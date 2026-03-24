@@ -98,6 +98,8 @@ type Indexer struct {
 	DetectLanguages bool         `yaml:"detect_languages" mapstructure:"detect_languages"`
 	Directories     []*Directory `yaml:"directories" mapstructure:"directories"`
 	MaxFileSize     int64        `yaml:"max_file_size_mb" mapstructure:"max_file_size_mb"`
+	MaxWatchDirs    int          `yaml:"max_watch_dirs" mapstructure:"max_watch_dirs"`
+	IndexWorkers    int          `yaml:"index_workers" mapstructure:"index_workers"`
 }
 
 type CrawlerCookie struct {
@@ -445,6 +447,8 @@ func CreateDefaultConfig() *Config {
 		Indexer: Indexer{
 			DetectLanguages: true,
 			MaxFileSize:     1,
+			MaxWatchDirs:    1000,
+			IndexWorkers:    5,
 		},
 		Crawler: CrawlerConfig{
 			Backend: "http",

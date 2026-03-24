@@ -18,6 +18,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	_ "time/tzdata"
 
@@ -159,10 +160,20 @@ var listenCmd = &cobra.Command{
 		if cfg.App.AccessToken != "" && strings.HasPrefix(cfg.BaseURL(""), "http://") {
 			log.Warn().Msg("Using authentication token without https. Token is sent plain-text in network requests.")
 		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
 		if len(cfg.Indexer.Directories) > 0 {
-			indexer.IndexAll(cfg.Indexer.Directories)
-			go func() {
-				if err := files.WatchDirectories(context.Background(), cfg.Indexer.Directories, func(path string) {
+			wg.Go(func() {
+				if err := indexer.IndexAll(ctx, cfg.Indexer.Directories, cfg.Indexer.IndexWorkers); err != nil && !errors.Is(err, context.Canceled) {
+					log.Error().Err(err).Msg("Initial indexing failed")
+				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				if err := files.WatchDirectories(ctx, cfg.Indexer.Directories, cfg.Indexer.IndexWorkers, cfg.Indexer.MaxWatchDirs, func(path string) {
 					userID, err := files.FindDirUser(cfg.Indexer.Directories, path)
 					if err != nil {
 						log.Error().Err(err).Str("path", path).Msg("Failed to resolve user for file")
@@ -178,13 +189,17 @@ var listenCmd = &cobra.Command{
 					if err := indexer.DeleteFile(path); err != nil {
 						log.Debug().Err(err).Str("path", path).Msg("Failed to delete file from index")
 					}
-				}); err != nil {
+				}); err != nil && !errors.Is(err, context.Canceled) {
 					log.Error().Err(err).Msg("File watcher failed")
 				}
-			}()
+			})
 		}
 		server.Version = Version
-		server.Listen(cfg)
+		server.Listen(cfg, func() {
+			cancel()
+			wg.Wait()
+			indexer.Close()
+		})
 	},
 }
 

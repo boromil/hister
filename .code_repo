@@ -1,0 +1,11 @@
+Current directory contains:
+- README.md
+- requirements.txt
+- tests/ (test suite)
+- src/ (source code)
+- docs/ (documentation)
+- .gitignore
+- .env
+- .docker/ (Docker configuration)
+
+This is a typical Python project repository with standard structure.

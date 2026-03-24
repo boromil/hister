@@ -24,6 +24,7 @@ import (
 	"github.com/asciimoo/hister/server/model"
 	"github.com/asciimoo/hister/server/types"
 	"github.com/asciimoo/hister/server/vectorstore"
+	"github.com/asciimoo/hister/xsync"
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
@@ -44,8 +45,8 @@ import (
 var Version = 8
 
 type indexer struct {
-	idx               bleve.IndexAlias       // used only for Search()
-	indexers          map[string]bleve.Index // default and language specific indexers
+	idx               bleve.IndexAlias               // used only for Search()
+	indexers          xsync.Map[string, bleve.Index] // default and language specific indexers
 	dir               string
 	data              *dataStore
 	langDetector      document.LanguageDetector
@@ -282,15 +283,13 @@ func initializeIndexer(basePath string, detectLanguages bool) (*indexer, error) 
 	idx.SetName(defaultIndexerName)
 	embedCtx, embedCancel := context.WithCancel(context.Background())
 	i := &indexer{
-		idx: bleve.NewIndexAlias(idx),
-		indexers: map[string]bleve.Index{
-			defaultIndexerName: idx,
-		},
+		idx:         bleve.NewIndexAlias(idx),
 		dir:         basePath,
 		embedCtx:    embedCtx,
 		embedCancel: embedCancel,
 		data:        newDataStore(filepath.Join(basePath, dataDirName)),
 	}
+	i.indexers.Store(defaultIndexerName, idx)
 	if !detectLanguages {
 		i.langDetector = document.NewNullLanguageDetector()
 	} else {
@@ -316,7 +315,7 @@ func initializeIndexer(basePath string, detectLanguages bool) (*indexer, error) 
 		}
 		langIdx.SetName(fn)
 		i.idx.Add(langIdx)
-		i.indexers[fn] = langIdx
+		i.indexers.Store(fn, langIdx)
 	}
 	return i, nil
 }
@@ -444,14 +443,14 @@ func Reindex(basePath string, rules *config.Rules, skipSensitiveChecks bool, det
 	idx.Close()
 	tmpIdx.vectorStore = nil // already referenced by vs; prevent double-close
 	tmpIdx.Close()
-	for n := range idx.indexers {
+	for n := range idx.indexers.All {
 		idxPath := filepath.Join(basePath, n)
 		if err := os.RemoveAll(idxPath); err != nil {
 			return err
 		}
 	}
 	var renameError error
-	for n := range tmpIdx.indexers {
+	for n := range tmpIdx.indexers.All {
 		idxPath := filepath.Join(basePath, n)
 		tmpIdxPath := filepath.Join(tmpBasePath, n)
 		if err := os.Rename(tmpIdxPath, idxPath); err != nil {
@@ -640,7 +639,7 @@ func (i *indexer) getDocKeysByID(id string) (htmlKeys, faviconKeys []string) {
 	q := bleve.NewDocIDQuery([]string{id})
 	req := bleve.NewSearchRequest(q)
 	req.Fields = []string{"html_key", "favicon_key"}
-	req.Size = len(i.indexers) + 1 // at most one entry per sub-index
+	req.Size = 20 // upper bound; at most one hit per sub-index
 	res, err := i.idx.Search(req)
 	if err != nil || len(res.Hits) < 1 {
 		return nil, nil
@@ -761,31 +760,30 @@ func GetLatestDocuments(limit int, latest string, userID uint) *Results {
 
 func (i *indexer) getOrCreate(lang string) bleve.Index {
 	if lang == document.UnknownLanguage || lang == "" {
-		return i.indexers[defaultIndexerName]
+		idx, _ := i.indexers.Load(defaultIndexerName)
+		return idx
 	}
 	idxName := fmt.Sprintf(langIndexerName, lang)
-	idx, ok := i.indexers[idxName]
-	if !ok {
-		err := i.addIndexer(idxName, lang)
-		if err != nil {
-			log.Warn().Err(err).Str("Name", idxName).Msg("Failed to create language indexer")
-			return i.indexers[defaultIndexerName]
-		}
-		idx = i.indexers[idxName]
+	idx, err := i.indexers.LoadOrCompute(idxName, func() (bleve.Index, error) {
+		return i.createIndex(idxName, lang)
+	})
+	if err != nil {
+		log.Warn().Err(err).Str("Name", idxName).Msg("Failed to create language indexer")
+		fallback, _ := i.indexers.Load(defaultIndexerName)
+		return fallback
 	}
 	return idx
 }
 
-func (i *indexer) addIndexer(name, lang string) error {
+func (i *indexer) createIndex(name, lang string) (bleve.Index, error) {
 	mapping := createMapping(lang)
 	idx, err := bleve.NewUsing(filepath.Join(i.dir, name), mapping, bleve.Config.DefaultIndexType, bleve.Config.DefaultMemKVStore, bleveRuntimeConfig())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	idx.SetName(name)
-	i.indexers[name] = idx
 	i.idx.Add(idx)
-	return nil
+	return idx, nil
 }
 
 func (i *indexer) Close() {
@@ -799,13 +797,19 @@ func (i *indexer) Close() {
 			log.Warn().Err(err).Msg("failed to close vector store")
 		}
 	}
-	for name, idx := range i.indexers {
+	for name, idx := range i.indexers.All {
 		if err := idx.Close(); err != nil {
 			log.Warn().Err(err).Str("index", name).Msg("failed to close index")
 		}
 	}
 	if err := i.idx.Close(); err != nil {
 		log.Warn().Err(err).Msg("failed to close index alias")
+	}
+}
+
+func Close() {
+	if i != nil {
+		i.Close()
 	}
 }
 
@@ -829,7 +833,7 @@ func (b *MultiBatch) getOrCreateBatch(name string, idx bleve.Index) *bleve.Batch
 
 func (b *MultiBatch) Add(d *document.Document) error {
 	if !d.IsProcessed() {
-		if err := d.Process(i.langDetector, extractor.Extract); err != nil {
+		if err := d.Process(b.indexer.langDetector, extractor.Extract); err != nil {
 			return err
 		}
 	}
@@ -845,9 +849,10 @@ func (b *MultiBatch) Add(d *document.Document) error {
 	// stale entry that corrupts reference counting.
 	// Skip for new documents (no old keys) — nothing to delete.
 	if len(oldHTMLKeys) > 0 || len(oldFaviconKeys) > 0 {
-		for name, idx := range b.indexer.indexers {
+		b.indexer.indexers.All(func(name string, idx bleve.Index) bool {
 			b.getOrCreateBatch(name, idx).Delete(d.ID())
-		}
+			return true
+		})
 	}
 	idx := b.indexer.getOrCreate(d.Language)
 	if err := b.getOrCreateBatch(idx.Name(), idx).Index(d.ID(), d); err != nil {
@@ -868,7 +873,7 @@ func (b *MultiBatch) Add(d *document.Document) error {
 
 func (b *MultiBatch) Delete(id string) {
 	oldHTMLKeys, oldFaviconKeys := b.indexer.getDocKeysByID(id)
-	for name, idx := range b.indexer.indexers {
+	for name, idx := range b.indexer.indexers.All {
 		b.getOrCreateBatch(name, idx).Delete(id)
 	}
 	for _, k := range oldHTMLKeys {
@@ -881,7 +886,11 @@ func (b *MultiBatch) Delete(id string) {
 
 func (b *MultiBatch) Save() error {
 	for name, lb := range b.batches {
-		if err := b.indexer.indexers[name].Batch(lb); err != nil {
+		idx, ok := b.indexer.indexers.Load(name)
+		if !ok {
+			continue
+		}
+		if err := idx.Batch(lb); err != nil {
 			return err
 		}
 	}
@@ -903,7 +912,7 @@ func Delete(id string) error {
 			log.Warn().Err(err).Str("id", id).Msg("vector store delete failed")
 		}
 	}
-	for _, idx := range i.indexers {
+	for _, idx := range i.indexers.All {
 		if err := idx.Delete(id); err != nil {
 			return err
 		}
