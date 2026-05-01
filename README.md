@@ -24,7 +24,7 @@ Hister is a general purpose web search engine providing automatic full-text inde
 
 ## Development
 
-**Requirements**: latest Go and NPM
+**Requirements**: latest Go and [Bun](https://bun.sh)
 
 - Clone the repository
 - Build with `./manage.sh build` (or `go generate ./...; go build`)
@@ -32,7 +32,7 @@ Hister is a general purpose web search engine providing automatic full-text inde
 To work on the web app with hot reload and automatic Go rebuilds:
 
 ```
-npm run serve:app
+bun run serve:app
 ```
 
 This starts a Vite dev server (with HMR) and the Go backend (with auto-rebuild via [air](https://github.com/air-verse/air)) concurrently.

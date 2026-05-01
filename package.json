@@ -3,11 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "serve:app": "npm -w @hister/app run serve --",
+    "serve:app": "bun run --cwd webui/app serve",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "fallow",
-    "check": "npm run format:check && npm run lint"
+    "check": "bun run format:check && bun run lint"
   },
   "workspaces": [
     "webui/app",
@@ -16,7 +16,6 @@
     "webui/ext"
   ],
   "devDependencies": {
-    "@types/node": "^25.9.1",
     "fallow": "^2.80.0",
     "prettier": "^3.8.3",
     "prettier-plugin-svelte": "^4.0.1",

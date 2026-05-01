@@ -29,15 +29,15 @@ jobs:
         with:
           go-version: 'stable'
 
-      - name: Set up Node
+      - name: Set up Bun
         if: steps.changes.outputs.skip != 'true'
-        uses: actions/setup-node@v6.4.0
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: latest
+          bun-version: latest
 
       - name: Build SPA
         if: steps.changes.outputs.skip != 'true'
-        run: npm ci && sh webui/build.sh
+        run: sh webui/build.sh
 
       - name: Build Go binary
         if: steps.changes.outputs.skip != 'true'
@@ -62,19 +62,19 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up Node
+      - name: Set up Bun
         if: steps.changes.outputs.skip != 'true'
-        uses: actions/setup-node@v6.4.0
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: latest
+          bun-version: latest
 
       - name: Install dependencies
         if: steps.changes.outputs.skip != 'true'
-        run: npm ci
+        run: bun install
 
       - name: Build website
         if: steps.changes.outputs.skip != 'true'
-        run: npm run build -w @hister/website
+        run: bun run --cwd webui/website build
 
   ext:
     name: Browser extension build
@@ -95,16 +95,16 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up Node
+      - name: Set up Bun
         if: steps.changes.outputs.skip != 'true'
-        uses: actions/setup-node@v6.4.0
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: latest
+          bun-version: latest
 
       - name: Install dependencies
         if: steps.changes.outputs.skip != 'true'
-        run: npm ci
+        run: bun install
 
       - name: Build extension
         if: steps.changes.outputs.skip != 'true'
-        run: npm run build -w @hister/ext
+        run: bun run --cwd webui/ext build

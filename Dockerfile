@@ -1,21 +1,22 @@
 # syntax=docker/dockerfile:1
 
 # Stage 1: Build frontend
-FROM node:22-alpine AS frontend
+FROM oven/bun:1.3 AS frontend
 
 WORKDIR /app
 
 # Copy workspace package files first for layer caching
-COPY package.json package-lock.json ./
+COPY package.json bun.lock ./
 COPY webui/app/package.json webui/app/
 COPY webui/components/package.json webui/components/
 COPY webui/website/package.json webui/website/
+COPY webui/ext/package.json webui/ext/
 
-RUN npm ci --workspaces
+RUN bun install --frozen-lockfile
 
 COPY webui/ webui/
 
-RUN npm run build -w @hister/app
+RUN bun run --cwd webui/app build
 
 # Stage 2: Build Go binary
 FROM golang:1.26-alpine AS builder
@@ -40,9 +41,9 @@ RUN CGO_ENABLED=1 go build \
 FROM alpine:3.21 AS release
 
 LABEL org.opencontainers.image.title="Hister" \
-      org.opencontainers.image.description="Self-hosted browser history search engine" \
-      org.opencontainers.image.source="https://github.com/asciimoo/hister" \
-      org.opencontainers.image.licenses="AGPL-3.0"
+    org.opencontainers.image.description="Self-hosted browser history search engine" \
+    org.opencontainers.image.source="https://github.com/asciimoo/hister" \
+    org.opencontainers.image.licenses="AGPL-3.0"
 
 WORKDIR /hister
 

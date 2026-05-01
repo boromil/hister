@@ -6,6 +6,7 @@ webui/ext/hister_ext_ff.zip
 webui/ext/hister_ext_chrome.zip
 result
 node_modules/
+package-lock.json
 dist/
 .fallow/
 .svelte-kit/

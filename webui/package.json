@@ -2,10 +2,10 @@
   "name": "hister-webui",
   "private": true,
   "scripts": {
-    "build:app": "npm -w @hister/app run build",
-    "build:website": "npm -w @hister/website run build",
-    "build": "npm run build:app && npm run build:website",
-    "dev:app": "npm -w @hister/app run dev",
-    "dev:website": "npm -w @hister/website run dev"
+    "build:app": "bun run --cwd webui/app build",
+    "build:website": "bun run --cwd webui/website build",
+    "build": "bun run build:app && bun run build:website",
+    "dev:app": "bun run --cwd webui/app dev",
+    "dev:website": "bun run --cwd webui/website dev"
   }
 }

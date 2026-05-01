@@ -4,8 +4,8 @@ set -e
 
 cd "$(dirname -- "$0")/.." || exit
 
-npm install --workspaces --include=optional
-npm run build -w @hister/app
+bun install
+bun run --cwd webui/app build
 
 rm -rf server/static/app
 mkdir -p server/static

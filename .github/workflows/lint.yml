@@ -29,22 +29,22 @@ jobs:
         with:
           go-version: 'stable'
 
-      - name: Set up Node
+      - name: Set up Bun
         if: steps.changes.outputs.skip != 'true'
-        uses: actions/setup-node@v6.4.0
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: latest
+          bun-version: latest
 
       - name: Build SPA
         if: steps.changes.outputs.skip != 'true'
-        run: npm ci && sh webui/build.sh
+        run: sh webui/build.sh
 
       - name: Run golangci-lint
         if: steps.changes.outputs.skip != 'true'
         uses: golangci/golangci-lint-action@v9.2.1
 
-  npm-format:
-    name: NPM formatting
+  bun-format:
+    name: JS formatting
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -52,35 +52,35 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check for NPM-related changes
+      - name: Check for JS-related changes
         id: changes
         run: |
-          FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'webui/**' 'package.json' 'package-lock.json' 'prettier.config.js')
+          FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'webui/**' 'package.json' 'prettier.config.js')
           if [ -z "$FILES" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up Node
+      - name: Set up Bun
         if: steps.changes.outputs.skip != 'true'
-        uses: actions/setup-node@v6.4.0
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: latest
+          bun-version: latest
 
       - name: Install dependencies
         if: steps.changes.outputs.skip != 'true'
-        run: npm ci
+        run: bun install
 
       - name: Run format
         if: steps.changes.outputs.skip != 'true'
-        run: npm run format
+        run: bun run format
 
       - name: Check for formatting changes
         if: steps.changes.outputs.skip != 'true'
         run: |
           if [ -n "$(git diff)" ]; then
-            echo "::error::NPM files are not formatted. Run 'npm run format' locally"
+            echo "::error::JS files are not formatted. Run 'bun run format' locally"
             git diff
             exit 1
           fi

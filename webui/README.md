@@ -7,9 +7,9 @@
 ## Build
 
 execute `./manage.sh build` to build the `app/`
-execute `npm run build -w @hister/website` to build the `website/`
+execute `bun run --cwd webui/website build` to build the `website/`
 
-live preview available for the `website/` with: `npm run preview -w @hister/website`
+live preview available for the `website/` with: `bun run --cwd webui/website preview`
 
 ## Add new component from ShadCN
 

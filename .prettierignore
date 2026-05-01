@@ -10,7 +10,7 @@ webui/ext/dist/
 node_modules/
 
 # Lock files
-package-lock.json
+bun.lock
 
 # Go (not formatted by Prettier)
 server/

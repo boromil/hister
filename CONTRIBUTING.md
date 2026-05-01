@@ -11,11 +11,11 @@ Thanks for your interest in contributing to Hister! This document outlines the g
 
 ### Frontend (SvelteKit + Tailwind)
 
-- Format with: `npm run format`
-- Check formatting: `npm run format:check`
-- Build the app: `npm run build -w @hister/app`
-- Build the website: `npm run build -w @hister/website`
-- Build the extension: `npm run build -w @hister/ext`
+- Format with: `bun run format`
+- Check formatting: `bun run format:check`
+- Build the app: `bun run --cwd webui/app build`
+- Build the website: `bun run --cwd webui/website build`
+- Build the extension: `bun run --cwd webui/ext build`
 
 ### Full Build
 
