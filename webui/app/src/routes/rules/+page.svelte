@@ -315,6 +315,39 @@
           </div>
         </Card.Header>
 
+        <div
+          class="bg-muted-surface border-brutal-border flex items-center border-b-[3px] px-4 py-4 md:px-5 md:py-5"
+        >
+          <form
+            onsubmit={addAlias}
+            class="flex w-full flex-col items-stretch gap-3 md:flex-row md:items-center"
+          >
+            <div class="flex items-center gap-3 md:contents">
+              <Input
+                type="text"
+                variant="brutal"
+                bind:value={newAliasKeyword}
+                placeholder="keyword..."
+                class="bg-card-surface focus-visible:border-hister-indigo h-10 w-28 px-3 md:w-35"
+              />
+              <Input
+                type="text"
+                variant="brutal"
+                bind:value={newAliasValue}
+                placeholder="expands to..."
+                class="bg-card-surface focus-visible:border-hister-indigo h-10 flex-1 px-3"
+              />
+            </div>
+            <Button
+              type="submit"
+              class="bg-hister-indigo font-space border-brutal-border brutal-press h-10 gap-2 border-[3px] px-5 text-sm font-bold tracking-[1px] text-white"
+            >
+              <Plus class="size-4 shrink-0" />
+              ADD
+            </Button>
+          </form>
+        </div>
+
         <Card.Content class="flex-1 p-0">
           <!-- Desktop table -->
           <div class="hidden md:block">
@@ -492,37 +525,6 @@
             </div>
           {/if}
         </Card.Content>
-
-        <Card.Footer>
-          <form
-            onsubmit={addAlias}
-            class="flex w-full flex-col items-stretch gap-3 md:flex-row md:items-center"
-          >
-            <div class="flex items-center gap-3 md:contents">
-              <Input
-                type="text"
-                variant="brutal"
-                bind:value={newAliasKeyword}
-                placeholder="keyword..."
-                class="bg-card-surface focus-visible:border-hister-indigo h-10 w-28 px-3 md:w-35"
-              />
-              <Input
-                type="text"
-                variant="brutal"
-                bind:value={newAliasValue}
-                placeholder="expands to..."
-                class="bg-card-surface focus-visible:border-hister-indigo h-10 flex-1 px-3"
-              />
-            </div>
-            <Button
-              type="submit"
-              class="bg-hister-indigo font-space border-brutal-border brutal-press h-10 gap-2 border-[3px] px-5 text-sm font-bold tracking-[1px] text-white"
-            >
-              <Plus class="size-4 shrink-0" />
-              ADD
-            </Button>
-          </form>
-        </Card.Footer>
       </Card.Root>
 
       <!-- Indexing Rules Card -->
@@ -545,6 +547,37 @@
             >
           </div>
         </Card.Header>
+
+        <div
+          class="bg-muted-surface border-brutal-border flex items-center border-b-[3px] px-4 py-4 md:px-5 md:py-5"
+        >
+          <div class="flex w-full flex-col items-stretch gap-3 md:flex-row md:items-center">
+            <div class="flex items-center gap-3 md:contents">
+              <Input
+                type="text"
+                variant="brutal"
+                bind:value={newRulePattern}
+                placeholder="Enter Go regexp pattern"
+                class="bg-card-surface focus-visible:border-hister-coral h-10 flex-1 px-3"
+              />
+              <select
+                bind:value={newRuleType}
+                class="bg-card-surface border-brutal-border font-space text-text-brand h-10 w-25 shrink-0 cursor-pointer appearance-none border-[3px] px-3 text-center text-xs font-bold tracking-[0.5px] outline-none md:w-27.5"
+              >
+                <option value="skip">SKIP</option>
+                <option value="priority">PRIORITY</option>
+              </select>
+            </div>
+            <Button
+              type="button"
+              onclick={addRule}
+              class="bg-hister-coral font-space border-brutal-border brutal-press h-10 gap-2 border-[3px] px-5 text-sm font-bold tracking-[1px] text-white"
+            >
+              <Plus class="size-4 shrink-0" />
+              ADD
+            </Button>
+          </div>
+        </div>
 
         <Card.Content class="flex-1 p-0">
           <!-- Desktop table -->
@@ -739,35 +772,6 @@
             </div>
           {/if}
         </Card.Content>
-
-        <Card.Footer>
-          <div class="flex w-full flex-col items-stretch gap-3 md:flex-row md:items-center">
-            <div class="flex items-center gap-3 md:contents">
-              <Input
-                type="text"
-                variant="brutal"
-                bind:value={newRulePattern}
-                placeholder="Enter Go regexp pattern"
-                class="bg-card-surface focus-visible:border-hister-coral h-10 flex-1 px-3"
-              />
-              <select
-                bind:value={newRuleType}
-                class="bg-card-surface border-brutal-border font-space text-text-brand h-10 w-25 shrink-0 cursor-pointer appearance-none border-[3px] px-3 text-center text-xs font-bold tracking-[0.5px] outline-none md:w-27.5"
-              >
-                <option value="skip">SKIP</option>
-                <option value="priority">PRIORITY</option>
-              </select>
-            </div>
-            <Button
-              type="button"
-              onclick={addRule}
-              class="bg-hister-coral font-space border-brutal-border brutal-press h-10 gap-2 border-[3px] px-5 text-sm font-bold tracking-[1px] text-white"
-            >
-              <Plus class="size-4 shrink-0" />
-              ADD
-            </Button>
-          </div>
-        </Card.Footer>
       </Card.Root>
     </div>
   {/if}
