@@ -31,7 +31,7 @@
   import * as DropdownMenu from '@hister/components/ui/dropdown-menu';
   import * as Tooltip from '@hister/components/ui/tooltip';
   import { ScrollArea } from '@hister/components/ui/scroll-area';
-  import { PreviewPopup, PreviewPanel } from '$lib/components';
+  import { PreviewPanel } from '$lib/components';
   import { Kbd } from '@hister/components/ui/kbd';
   import {
     Search,
@@ -97,6 +97,7 @@
   let showPopup = $state(false);
   let popupUrl = $state('');
   let popupHintTitle = $state('');
+  let previewFullscreen = $state(false);
   let actionsQuery = $state('');
   let actionsMessage: string | null = $state(null);
   let actionsError = $state(false);
@@ -304,22 +305,70 @@
   let skipUrlUpdate = false;
   let lastPushedEmpty = true;
 
+  // --- URL builders ---
+
+  function buildSearchUrl(): string {
+    return query
+      ? `/?q=${encodeURIComponent(query)}${dateFrom ? '&date_from=' + encodeURIComponent(dateFrom) : ''}${dateTo ? '&date_to=' + encodeURIComponent(dateTo) : ''}`
+      : '/';
+  }
+
+  function buildPreviewUrl(id: string, title: string): string {
+    return `/preview?id=${encodeURIComponent(id)}${title ? '&title=' + encodeURIComponent(title) : ''}`;
+  }
+
+  // --- History state helpers ---
+
+  function pushSearchHistory() {
+    const url = buildSearchUrl();
+    history.pushState({ type: 'search', query, dateFrom, dateTo }, '', url);
+    lastPushedEmpty = !query;
+  }
+
+  function replaceSearchHistory() {
+    const url = buildSearchUrl();
+    history.replaceState({ type: 'search', query, dateFrom, dateTo }, '', url);
+    lastPushedEmpty = !query;
+  }
+
+  function pushPreviewHistory(id: string, title: string) {
+    history.pushState({ type: 'preview', id, title }, '', buildPreviewUrl(id, title));
+  }
+
+  function replacePreviewHistory(id: string, title: string) {
+    history.replaceState({ type: 'preview', id, title }, '', buildPreviewUrl(id, title));
+  }
+
+  // Sets skipUrlUpdate around a history mutation so the reactive updateURL effect stays quiet.
+  function withSkipUrl(fn: () => void) {
+    skipUrlUpdate = true;
+    fn();
+    tick().then(() => {
+      skipUrlUpdate = false;
+    });
+  }
+
   function updateURL() {
     if (skipUrlUpdate) return;
+    if (previewFullscreen) return;
     const isEmpty = !query;
-    const url = query
-      ? `${window.location.pathname}?q=${encodeURIComponent(query)}${dateFrom ? '&date_from=' + encodeURIComponent(dateFrom) : ''}${dateTo ? '&date_to=' + encodeURIComponent(dateTo) : ''}`
-      : window.location.pathname;
-
     if (isEmpty !== lastPushedEmpty) {
-      history.pushState({ query, dateFrom, dateTo }, '', url);
-      lastPushedEmpty = isEmpty;
+      pushSearchHistory();
     } else {
-      history.replaceState({ query, dateFrom, dateTo }, '', url);
+      replaceSearchHistory();
     }
   }
 
-  function handlePopState() {
+  function handlePopState(event: PopStateEvent) {
+    const state = event.state as { type?: string; id?: string; title?: string } | null;
+    if (state?.type === 'preview') {
+      panelUrl = state.id || '';
+      panelHintTitle = state.title || '';
+      panelOpen = true;
+      previewFullscreen = true;
+      return;
+    }
+    previewFullscreen = false;
     skipUrlUpdate = true;
     const params = new URLSearchParams(window.location.search);
     query = params.get('q') || '';
@@ -576,9 +625,28 @@
       panelUrl = url;
       return;
     }
-    popupHintTitle = title;
-    popupUrl = url;
-    showPopup = true;
+    // Mobile: open fullscreen preview instead of popup dialog
+    panelUrl = url;
+    panelHintTitle = title;
+    previewFullscreen = true;
+    withSkipUrl(() => pushPreviewHistory(url, title));
+  }
+
+  function enterFullscreen() {
+    previewFullscreen = true;
+    withSkipUrl(() => pushPreviewHistory(panelUrl, panelHintTitle));
+  }
+
+  function exitFullscreen() {
+    previewFullscreen = false;
+    withSkipUrl(() => pushSearchHistory());
+  }
+
+  function closePanelAndFullscreen() {
+    previewFullscreen = false;
+    panelOpen = false;
+    localStorage.setItem('hister-panel-open', 'false');
+    withSkipUrl(() => pushSearchHistory());
   }
 
   function selectNthResult(n: number) {
@@ -613,18 +681,36 @@
 
   function viewResultPopup(e?: KeyboardEvent) {
     if (e) e.preventDefault();
-    if (showPopup) {
-      closePopup();
-      return;
+    if (isDesktop) {
+      if (previewFullscreen) {
+        // Fullscreen → back to split-screen
+        exitFullscreen();
+      } else if (panelOpen) {
+        // Split-screen → fullscreen
+        enterFullscreen();
+      } else {
+        // No preview → open split-screen
+        openHighlightedReadable();
+      }
+    } else {
+      // Mobile: toggle fullscreen
+      if (previewFullscreen) {
+        closePanelAndFullscreen();
+      } else {
+        openHighlightedReadable();
+      }
     }
+  }
+
+  function openHighlightedReadable() {
     const readables = document.querySelectorAll('[data-result] [data-readable]');
     if (highlightIdx >= 0 && highlightIdx < readables.length) {
       const el = readables[highlightIdx] as HTMLElement;
       const result = el.closest('[data-result]')!;
       const link = result.querySelector<HTMLAnchorElement>('[data-result-link]')!;
       openReadable(
-        { preventDefault: () => {} } as Event,
-        link.getAttribute('data-result-link'),
+        { preventDefault: () => {}, stopPropagation: () => {} } as unknown as Event,
+        link.getAttribute('data-result-link')!,
         link.innerText,
       );
     }
@@ -652,6 +738,10 @@
   }
 
   function closePopup(): boolean {
+    if (previewFullscreen) {
+      closePanelAndFullscreen();
+      return true;
+    }
     if (showPopup) {
       showPopup = false;
       return true;
@@ -905,17 +995,21 @@
   // Auto-load the readability panel for the focused result on desktop.
   // Tracks mergedResults (not just lastResults) so that reordering caused by
   // the semantic weight slider also refreshes the panel.
+  // Uses data instead of DOM queries so it works when results are hidden (fullscreen mode).
   $effect(() => {
     const idx = highlightIdx;
     const results = mergedResults; // reactive dependency: reorders trigger this
-    if (!isDesktop || !results.length || !panelOpen) return;
-    const links = document.querySelectorAll<HTMLAnchorElement>('[data-result] [data-result-link]');
-    const link = links[idx];
-    if (!link) return;
-    const url = link.getAttribute('data-result-link');
+    const isFullscreen = previewFullscreen;
+    if (!isDesktop || !results.length || (!panelOpen && !isFullscreen)) return;
+    const result = results[idx];
+    if (!result) return;
+    const url = result.url;
     if (url === untrack(() => panelUrl)) return;
-    panelHintTitle = link.innerText;
+    panelHintTitle = result.title || '';
     panelUrl = url;
+    if (isFullscreen) {
+      withSkipUrl(() => replacePreviewHistory(url, result.title || ''));
+    }
   });
   $effect(() => {
     updateURL();
@@ -994,8 +1088,6 @@
 </svelte:head>
 
 <svelte:window onkeydown={handleKeydown} onpopstate={handlePopState} />
-
-<PreviewPopup bind:open={showPopup} url={popupUrl} hintTitle={popupHintTitle} />
 
 <Dialog.Root bind:open={$showHelp}>
   <Dialog.Content
@@ -1192,586 +1284,602 @@
     {/if}
 
     <div class="flex min-h-0 flex-1 overflow-hidden">
-      <ScrollArea class="min-h-0 flex-1">
-        <div class="w-full max-w-[70em] space-y-3 overflow-x-hidden px-3 py-2 md:px-12">
-          {#if deleteError}
-            <div
-              class="border-hister-rose bg-hister-rose/10 text-hister-rose flex items-center justify-between gap-2 border-[2px] px-3 py-2 text-sm"
-            >
-              <span class="font-inter">{deleteError}</span>
-              <button
-                class="shrink-0 cursor-pointer opacity-60 hover:opacity-100"
-                onclick={() => (deleteError = null)}
-                aria-label="Dismiss">✕</button
+      {#if !previewFullscreen}
+        <ScrollArea class="min-h-0 flex-1">
+          <div class="w-full max-w-[70em] space-y-3 overflow-x-hidden px-3 py-2 md:px-12">
+            {#if deleteError}
+              <div
+                class="border-hister-rose bg-hister-rose/10 text-hister-rose flex items-center justify-between gap-2 border-[2px] px-3 py-2 text-sm"
               >
-            </div>
-          {/if}
-          {#if hasResults}
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <span class="font-outfit text-hister-indigo text-sm font-bold md:text-base">
-                {semanticOn && config.semanticEnabled
-                  ? totalResults
-                  : lastResults?.total || totalResults} results{query ? ` for "${query}"` : ''}
-              </span>
-              <div class="flex items-center gap-2">
-                {#if isDesktop && !panelOpen}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    class="font-inter text-text-brand-muted hover:text-hister-indigo gap-1 text-xs"
-                    onclick={() => {
-                      panelOpen = true;
-                      localStorage.setItem('hister-panel-open', 'true');
-                    }}
-                  >
-                    <Eye class="size-3" />
-                    Preview
-                  </Button>
-                {/if}
-                <DropdownMenu.Root>
-                  <DropdownMenu.Trigger>
-                    {#snippet child({ props })}
-                      <Button
-                        {...props}
-                        variant="ghost"
-                        size="sm"
-                        class="font-inter text-text-brand-muted hover:text-hister-indigo gap-1 text-xs"
-                      >
-                        <Filter class="size-3" />
-                        Search Actions
-                        <ChevronDown class="size-3" />
-                      </Button>
-                    {/snippet}
-                  </DropdownMenu.Trigger>
-                  <DropdownMenu.Content
-                    class="border-brutal-border bg-card-surface w-80 rounded-none border-[3px] p-3 shadow-[4px_4px_0_var(--brutal-shadow)]"
-                  >
-                    <div class="space-y-3">
-                      <div class="space-y-2">
-                        <p
-                          class="font-inter text-text-brand-muted flex items-center gap-1.5 text-xs font-semibold"
+                <span class="font-inter">{deleteError}</span>
+                <button
+                  class="shrink-0 cursor-pointer opacity-60 hover:opacity-100"
+                  onclick={() => (deleteError = null)}
+                  aria-label="Dismiss">✕</button
+                >
+              </div>
+            {/if}
+            {#if hasResults}
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <span class="font-outfit text-hister-indigo text-sm font-bold md:text-base">
+                  {semanticOn && config.semanticEnabled
+                    ? totalResults
+                    : lastResults?.total || totalResults} results{query ? ` for "${query}"` : ''}
+                </span>
+                <div class="flex items-center gap-2">
+                  {#if isDesktop && !panelOpen}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="font-inter text-text-brand-muted hover:text-hister-indigo gap-1 text-xs"
+                      onclick={() => {
+                        panelOpen = true;
+                        localStorage.setItem('hister-panel-open', 'true');
+                      }}
+                    >
+                      <Eye class="size-3" />
+                      Preview
+                    </Button>
+                  {/if}
+                  <DropdownMenu.Root>
+                    <DropdownMenu.Trigger>
+                      {#snippet child({ props })}
+                        <Button
+                          {...props}
+                          variant="ghost"
+                          size="sm"
+                          class="font-inter text-text-brand-muted hover:text-hister-indigo gap-1 text-xs"
                         >
-                          <Calendar class="size-3" />
-                          Date Filter
-                        </p>
-                        <div class="flex flex-col gap-2">
-                          <label
-                            class="font-inter text-text-brand-secondary flex items-center gap-1.5 text-xs"
-                          >
-                            From:
-                            <Input
-                              type="date"
-                              bind:value={dateFrom}
-                              class="border-border-brand-muted bg-card-surface text-text-brand font-fira focus-visible:border-hister-indigo h-7 flex-1 border-[2px] px-2 text-xs shadow-none focus-visible:ring-0"
-                            />
-                          </label>
-                          <label
-                            class="font-inter text-text-brand-secondary flex items-center gap-1.5 text-xs"
-                          >
-                            To:
-                            <Input
-                              type="date"
-                              bind:value={dateTo}
-                              class="border-border-brand-muted bg-card-surface text-text-brand font-fira focus-visible:border-hister-indigo h-7 flex-1 border-[2px] px-2 text-xs shadow-none focus-visible:ring-0"
-                            />
-                          </label>
-                        </div>
-                      </div>
-                      <Separator class="bg-border-brand-muted" />
-                      {#if config.semanticEnabled && semanticOn}
+                          <Filter class="size-3" />
+                          Search Actions
+                          <ChevronDown class="size-3" />
+                        </Button>
+                      {/snippet}
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Content
+                      class="border-brutal-border bg-card-surface w-80 rounded-none border-[3px] p-3 shadow-[4px_4px_0_var(--brutal-shadow)]"
+                    >
+                      <div class="space-y-3">
                         <div class="space-y-2">
                           <p
                             class="font-inter text-text-brand-muted flex items-center gap-1.5 text-xs font-semibold"
                           >
-                            <Sparkles class="size-3" />
-                            Semantic Search
+                            <Calendar class="size-3" />
+                            Date Filter
                           </p>
-                          <label
-                            class="font-inter text-text-brand-secondary flex flex-col gap-1 text-xs"
-                          >
-                            <span
-                              >Similarity threshold: <span class="font-fira text-hister-indigo"
-                                >{similarityThreshold.toFixed(2)}</span
-                              ></span
+                          <div class="flex flex-col gap-2">
+                            <label
+                              class="font-inter text-text-brand-secondary flex items-center gap-1.5 text-xs"
                             >
-                            <input
-                              type="range"
-                              min="0"
-                              max="1"
-                              step="0.002"
-                              bind:value={similarityThreshold}
-                              class="accent-hister-indigo w-full cursor-pointer"
-                            />
-                          </label>
-                          <label
-                            class="font-inter text-text-brand-secondary flex flex-col gap-1 text-xs"
-                          >
-                            <span
-                              >Semantic weight: <span class="font-fira text-hister-indigo"
-                                >{semanticWeight.toFixed(2)}</span
-                              ></span
+                              From:
+                              <Input
+                                type="date"
+                                bind:value={dateFrom}
+                                class="border-border-brand-muted bg-card-surface text-text-brand font-fira focus-visible:border-hister-indigo h-7 flex-1 border-[2px] px-2 text-xs shadow-none focus-visible:ring-0"
+                              />
+                            </label>
+                            <label
+                              class="font-inter text-text-brand-secondary flex items-center gap-1.5 text-xs"
                             >
-                            <input
-                              type="range"
-                              min="0"
-                              max="1"
-                              step="0.05"
-                              bind:value={semanticWeight}
-                              class="accent-hister-indigo w-full cursor-pointer"
-                            />
-                          </label>
+                              To:
+                              <Input
+                                type="date"
+                                bind:value={dateTo}
+                                class="border-border-brand-muted bg-card-surface text-text-brand font-fira focus-visible:border-hister-indigo h-7 flex-1 border-[2px] px-2 text-xs shadow-none focus-visible:ring-0"
+                              />
+                            </label>
+                          </div>
                         </div>
                         <Separator class="bg-border-brand-muted" />
-                      {/if}
-                      <div class="space-y-2">
-                        <p
-                          class="font-inter text-text-brand-muted flex items-center gap-1.5 text-xs font-semibold"
-                        >
-                          <Download class="size-3" />
-                          Export Results
-                        </p>
-                        <div class="flex flex-wrap gap-2">
+                        {#if config.semanticEnabled && semanticOn}
+                          <div class="space-y-2">
+                            <p
+                              class="font-inter text-text-brand-muted flex items-center gap-1.5 text-xs font-semibold"
+                            >
+                              <Sparkles class="size-3" />
+                              Semantic Search
+                            </p>
+                            <label
+                              class="font-inter text-text-brand-secondary flex flex-col gap-1 text-xs"
+                            >
+                              <span
+                                >Similarity threshold: <span class="font-fira text-hister-indigo"
+                                  >{similarityThreshold.toFixed(2)}</span
+                                ></span
+                              >
+                              <input
+                                type="range"
+                                min="0"
+                                max="1"
+                                step="0.002"
+                                bind:value={similarityThreshold}
+                                class="accent-hister-indigo w-full cursor-pointer"
+                              />
+                            </label>
+                            <label
+                              class="font-inter text-text-brand-secondary flex flex-col gap-1 text-xs"
+                            >
+                              <span
+                                >Semantic weight: <span class="font-fira text-hister-indigo"
+                                  >{semanticWeight.toFixed(2)}</span
+                                ></span
+                              >
+                              <input
+                                type="range"
+                                min="0"
+                                max="1"
+                                step="0.05"
+                                bind:value={semanticWeight}
+                                class="accent-hister-indigo w-full cursor-pointer"
+                              />
+                            </label>
+                          </div>
+                          <Separator class="bg-border-brand-muted" />
+                        {/if}
+                        <div class="space-y-2">
+                          <p
+                            class="font-inter text-text-brand-muted flex items-center gap-1.5 text-xs font-semibold"
+                          >
+                            <Download class="size-3" />
+                            Export Results
+                          </p>
+                          <div class="flex flex-wrap gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              class="border-hister-indigo text-hister-indigo hover:bg-hister-indigo/10 h-7 border-[2px] text-xs"
+                              onclick={() =>
+                                exportJSON({ ...lastResults!, documents: accumulatedDocs })}
+                            >
+                              JSON
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              class="border-hister-indigo text-hister-indigo hover:bg-hister-indigo/10 h-7 border-[2px] text-xs"
+                              onclick={() =>
+                                exportCSV({ ...lastResults!, documents: accumulatedDocs }, query)}
+                            >
+                              CSV
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              class="border-hister-indigo text-hister-indigo hover:bg-hister-indigo/10 h-7 border-[2px] text-xs"
+                              onclick={() =>
+                                exportRSS({ ...lastResults!, documents: accumulatedDocs }, query)}
+                            >
+                              RSS
+                            </Button>
+                          </div>
+                        </div>
+                        <Separator class="bg-border-brand-muted" />
+                        <div class="space-y-2">
+                          <p
+                            class="font-inter text-hister-rose flex items-center gap-1.5 text-xs font-semibold"
+                          >
+                            <Trash2 class="size-3" />
+                            Danger Zone
+                          </p>
                           <Button
                             variant="outline"
                             size="sm"
-                            class="border-hister-indigo text-hister-indigo hover:bg-hister-indigo/10 h-7 border-[2px] text-xs"
-                            onclick={() =>
-                              exportJSON({ ...lastResults!, documents: accumulatedDocs })}
+                            class="border-hister-rose text-hister-rose hover:bg-hister-rose/10 h-7 w-full border-[2px] text-xs"
+                            onclick={() => {
+                              showDeleteAllConfirm = true;
+                            }}
                           >
-                            JSON
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            class="border-hister-indigo text-hister-indigo hover:bg-hister-indigo/10 h-7 border-[2px] text-xs"
-                            onclick={() =>
-                              exportCSV({ ...lastResults!, documents: accumulatedDocs }, query)}
-                          >
-                            CSV
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            class="border-hister-indigo text-hister-indigo hover:bg-hister-indigo/10 h-7 border-[2px] text-xs"
-                            onclick={() =>
-                              exportRSS({ ...lastResults!, documents: accumulatedDocs }, query)}
-                          >
-                            RSS
+                            <Trash2 class="size-3" />
+                            Delete all matching results
                           </Button>
                         </div>
                       </div>
-                      <Separator class="bg-border-brand-muted" />
-                      <div class="space-y-2">
-                        <p
-                          class="font-inter text-hister-rose flex items-center gap-1.5 text-xs font-semibold"
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Root>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="font-inter text-text-brand-muted hover:text-hister-coral gap-1 text-xs no-underline"
+                    href={getSearchUrl(config.searchUrl, query)}
+                  >
+                    <ExternalLink class="size-3" />
+                    Web
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="font-inter text-hister-indigo hover:text-hister-coral text-xs"
+                    onclick={() => setSort(currentSort === '' ? 'domain' : '')}
+                  >
+                    Sort: {currentSort === 'domain' ? 'Domain' : 'Relevance'}
+                  </Button>
+                </div>
+              </div>
+
+              {#if lastResults?.query && lastResults.query.text.length > query.length}
+                <p class="font-inter text-text-brand-muted text-sm">
+                  Expanded query: <code
+                    class="font-fira bg-muted-surface text-primary px-1.5 py-0.5 text-xs"
+                    >{lastResults.query.text}</code
+                  >
+                </p>
+              {/if}
+
+              {#if lastResults?.history?.length}
+                {#each lastResults.history as r, i}
+                  {@const favSrc = getFaviconSrc(r.favicon, r.url)}
+                  <article
+                    data-result
+                    class="flex w-full scroll-my-[6em] gap-3 overflow-hidden py-3.5 transition-all duration-150"
+                    style={i === highlightIdx
+                      ? 'background: linear-gradient(90deg, transparent, rgba(90, 138, 138, 0.12), transparent); border-left: 3px solid var(--hister-teal); padding-left: 0.75rem;'
+                      : ''}
+                  >
+                    <div class="w-0 min-w-0 flex-1 space-y-0.5">
+                      <div class="flex items-center gap-1.5">
+                        <div
+                          class="bg-hister-teal flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden"
                         >
-                          <Trash2 class="size-3" />
-                          Danger Zone
-                        </p>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          class="border-hister-rose text-hister-rose hover:bg-hister-rose/10 h-7 w-full border-[2px] text-xs"
+                          {#if favSrc}
+                            <img
+                              src={favSrc}
+                              alt=""
+                              class="h-full w-full object-cover"
+                              onload={(e) => {
+                                (
+                                  e.target as HTMLImageElement
+                                ).parentElement!.style.backgroundColor = 'transparent';
+                              }}
+                              onerror={(e) => {
+                                (e.target as HTMLImageElement).style.display = 'none';
+                                (e.target as HTMLImageElement).nextElementSibling?.classList.remove(
+                                  'hidden',
+                                );
+                              }}
+                            />
+                            <Star class="hidden size-3 text-white" />
+                          {:else}
+                            <Star class="size-3 text-white" />
+                          {/if}
+                        </div>
+                        <a
+                          data-result-link={r.url}
+                          href={fileResultUrl(r.url)}
+                          class="font-outfit text-md text-hister-teal min-w-0 flex-1 font-semibold hover:underline md:overflow-hidden md:text-xl"
+                          target={config.openResultsOnNewTab ? '_blank' : undefined}
                           onclick={() => {
-                            showDeleteAllConfirm = true;
+                            sendHistoryBeacon(r.url, r.title || '*title*', query);
+                          }}
+                          onauxclick={(e) => {
+                            if (e.button === 1)
+                              sendHistoryBeacon(r.url, r.title || '*title*', query);
                           }}
                         >
-                          <Trash2 class="size-3" />
-                          Delete all matching results
+                          {r.title || '*title*'}
+                        </a>
+                        <DropdownMenu.Root>
+                          <DropdownMenu.Trigger>
+                            {#snippet child({ props })}
+                              <Button
+                                {...props}
+                                variant="ghost"
+                                size="icon-sm"
+                                class="text-text-brand-muted hover:text-text-brand shrink-0 cursor-pointer"
+                                onclick={() => {
+                                  actionsMessage = null;
+                                  actionsError = false;
+                                }}
+                              >
+                                <MoreVertical class="size-4" />
+                              </Button>
+                            {/snippet}
+                          </DropdownMenu.Trigger>
+                          <DropdownMenu.Content
+                            class="border-brutal-border bg-card-surface w-72 rounded-none border-[3px] p-3 shadow-[4px_4px_0_var(--brutal-shadow)]"
+                          >
+                            <div class="space-y-3">
+                              <div class="space-y-2">
+                                <p
+                                  class="font-outfit text-text-brand-muted mb-1 text-xs font-bold tracking-widest uppercase"
+                                >
+                                  Priority
+                                </p>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  class="border-hister-rose text-hister-rose hover:bg-hister-rose/10 w-full border-[2px] text-xs"
+                                  onclick={() =>
+                                    updatePriorityResult(r.url, r.title || '*title*', true)}
+                                >
+                                  <PinOff class="size-3.5" />
+                                  Unpin
+                                </Button>
+                              </div>
+                              <SkipRuleActions
+                                onAddSkipRule={(type, deleteMatches) =>
+                                  addSkipRuleForResult(r.url, r.domain, type, deleteMatches)}
+                              />
+                              {#if actionsMessage}
+                                <p
+                                  class="font-inter text-xs {actionsError
+                                    ? 'text-hister-rose'
+                                    : 'text-hister-teal'}"
+                                >
+                                  {actionsMessage}
+                                </p>
+                              {/if}
+                            </div>
+                          </DropdownMenu.Content>
+                        </DropdownMenu.Root>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <span
+                          class="font-fira text-hister-teal truncate overflow-hidden text-ellipsis whitespace-nowrap"
+                          >{r.url}</span
+                        >
+                        <Badge
+                          variant="secondary"
+                          class="bg-hister-teal/10 text-hister-teal h-4 border-0 px-1.5 py-0"
+                          >pinned</Badge
+                        >
+                        <Button
+                          data-readable
+                          variant="link"
+                          size="sm"
+                          class="text-hister-indigo h-auto shrink-0 cursor-pointer gap-0.5 p-0 text-xs font-medium md:text-sm"
+                          onclick={(e) => {
+                            highlightIdx = i;
+                            openReadable(e, r.url, r.title || '*title*');
+                          }}
+                        >
+                          <Eye class="size-3" /><span>view</span>
                         </Button>
                       </div>
-                    </div>
-                  </DropdownMenu.Content>
-                </DropdownMenu.Root>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="font-inter text-text-brand-muted hover:text-hister-coral gap-1 text-xs no-underline"
-                  href={getSearchUrl(config.searchUrl, query)}
-                >
-                  <ExternalLink class="size-3" />
-                  Web
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="font-inter text-hister-indigo hover:text-hister-coral text-xs"
-                  onclick={() => setSort(currentSort === '' ? 'domain' : '')}
-                >
-                  Sort: {currentSort === 'domain' ? 'Domain' : 'Relevance'}
-                </Button>
-              </div>
-            </div>
-
-            {#if lastResults?.query && lastResults.query.text.length > query.length}
-              <p class="font-inter text-text-brand-muted text-sm">
-                Expanded query: <code
-                  class="font-fira bg-muted-surface text-primary px-1.5 py-0.5 text-xs"
-                  >{lastResults.query.text}</code
-                >
-              </p>
-            {/if}
-
-            {#if lastResults?.history?.length}
-              {#each lastResults.history as r, i}
-                {@const favSrc = getFaviconSrc(r.favicon, r.url)}
-                <article
-                  data-result
-                  class="flex w-full scroll-my-[6em] gap-3 overflow-hidden py-3.5 transition-all duration-150"
-                  style={i === highlightIdx
-                    ? 'background: linear-gradient(90deg, transparent, rgba(90, 138, 138, 0.12), transparent); border-left: 3px solid var(--hister-teal); padding-left: 0.75rem;'
-                    : ''}
-                >
-                  <div class="w-0 min-w-0 flex-1 space-y-0.5">
-                    <div class="flex items-center gap-1.5">
-                      <div
-                        class="bg-hister-teal flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden"
-                      >
-                        {#if favSrc}
-                          <img
-                            src={favSrc}
-                            alt=""
-                            class="h-full w-full object-cover"
-                            onload={(e) => {
-                              (e.target as HTMLImageElement).parentElement!.style.backgroundColor =
-                                'transparent';
-                            }}
-                            onerror={(e) => {
-                              (e.target as HTMLImageElement).style.display = 'none';
-                              (e.target as HTMLImageElement).nextElementSibling?.classList.remove(
-                                'hidden',
-                              );
-                            }}
-                          />
-                          <Star class="hidden size-3 text-white" />
-                        {:else}
-                          <Star class="size-3 text-white" />
-                        {/if}
-                      </div>
-                      <a
-                        data-result-link={r.url}
-                        href={fileResultUrl(r.url)}
-                        class="font-outfit text-md text-hister-teal min-w-0 flex-1 font-semibold hover:underline md:overflow-hidden md:text-xl"
-                        target={config.openResultsOnNewTab ? '_blank' : undefined}
-                        onclick={() => {
-                          sendHistoryBeacon(r.url, r.title || '*title*', query);
-                        }}
-                        onauxclick={(e) => {
-                          if (e.button === 1) sendHistoryBeacon(r.url, r.title || '*title*', query);
-                        }}
-                      >
-                        {r.title || '*title*'}
-                      </a>
-                      <DropdownMenu.Root>
-                        <DropdownMenu.Trigger>
-                          {#snippet child({ props })}
-                            <Button
-                              {...props}
-                              variant="ghost"
-                              size="icon-sm"
-                              class="text-text-brand-muted hover:text-text-brand shrink-0 cursor-pointer"
-                              onclick={() => {
-                                actionsMessage = null;
-                                actionsError = false;
-                              }}
-                            >
-                              <MoreVertical class="size-4" />
-                            </Button>
-                          {/snippet}
-                        </DropdownMenu.Trigger>
-                        <DropdownMenu.Content
-                          class="border-brutal-border bg-card-surface w-72 rounded-none border-[3px] p-3 shadow-[4px_4px_0_var(--brutal-shadow)]"
+                      {#if r.text}
+                        <p
+                          class="font-inter text-text-brand-secondary text-sm leading-[1.4] md:text-base"
                         >
-                          <div class="space-y-3">
-                            <div class="space-y-2">
-                              <p
-                                class="font-outfit text-text-brand-muted mb-1 text-xs font-bold tracking-widest uppercase"
+                          {@html r.text}
+                        </p>
+                      {/if}
+                    </div>
+                  </article>
+                {/each}
+              {/if}
+
+              {#if mergedResults.length > 0}
+                {#each mergedResults as r, i}
+                  {@const idx = historyLen + i}
+                  {@const color = 'hister-cyan'}
+                  {@const favSrc = getFaviconSrc(r.favicon, r.url)}
+                  {@const isSemOnly = r.sourceType === 'semantic'}
+                  <article
+                    data-result
+                    class="flex w-full scroll-my-[6em] gap-3 overflow-hidden py-3.5 transition-all duration-150"
+                    style={idx === highlightIdx
+                      ? `background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--${color}) 12%, transparent), transparent); border-left: 3px solid var(--${color}); padding-left: 0.75rem;`
+                      : ''}
+                  >
+                    <div class="w-0 min-w-0 flex-1 space-y-0.5">
+                      <div class="flex items-center gap-1.5">
+                        <div
+                          class="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden"
+                          style="background-color: var(--{color});"
+                        >
+                          {#if favSrc}
+                            <img
+                              src={favSrc}
+                              alt=""
+                              class="h-full w-full object-cover"
+                              onload={(e) => {
+                                (
+                                  e.target as HTMLImageElement
+                                ).parentElement!.style.backgroundColor = 'transparent';
+                              }}
+                              onerror={(e) => {
+                                (e.target as HTMLImageElement).style.display = 'none';
+                                (e.target as HTMLImageElement).nextElementSibling?.classList.remove(
+                                  'hidden',
+                                );
+                              }}
+                            />
+                            <Globe class="hidden size-3 text-white" />
+                          {:else}
+                            <Globe class="size-3 text-white" />
+                          {/if}
+                        </div>
+                        <a
+                          data-result-link={r.url}
+                          href={fileResultUrl(r.url)}
+                          class="font-outfit text-md min-w-0 flex-1 font-semibold hover:underline md:text-xl"
+                          style="color: var(--{color});"
+                          target={config.openResultsOnNewTab ? '_blank' : undefined}
+                          onclick={() => {
+                            sendHistoryBeacon(r.url, r.title || '*title*', query);
+                          }}
+                          onauxclick={(e) => {
+                            if (e.button === 1)
+                              sendHistoryBeacon(r.url, r.title || '*title*', query);
+                          }}
+                        >
+                          {r.title || '*title*'}
+                        </a>
+                        <DropdownMenu.Root>
+                          <DropdownMenu.Trigger>
+                            {#snippet child({ props })}
+                              <Button
+                                {...props}
+                                variant="ghost"
+                                size="icon-sm"
+                                class="text-text-brand-muted hover:text-text-brand shrink-0 cursor-pointer"
+                                onclick={() => {
+                                  actionsMessage = null;
+                                  actionsError = false;
+                                }}
                               >
-                                Priority
-                              </p>
+                                <MoreVertical class="size-4" />
+                              </Button>
+                            {/snippet}
+                          </DropdownMenu.Trigger>
+                          <DropdownMenu.Content
+                            class="border-brutal-border bg-card-surface w-100 rounded-none border-[3px] p-3 shadow-[4px_4px_0_var(--brutal-shadow)]"
+                          >
+                            <div class="space-y-3">
+                              <div class="space-y-2">
+                                <p
+                                  class="font-outfit mb-1 text-xs font-bold tracking-widest uppercase"
+                                >
+                                  Prioritize this result in query:
+                                </p>
+                                <div class="flex items-center gap-2">
+                                  <Input
+                                    bind:value={actionsQuery}
+                                    placeholder="Query.."
+                                    size="sm"
+                                    class="font-inter border-border-brand-muted focus-visible:border-hister-indigo flex-1 border-[2px] text-sm shadow-none focus-visible:ring-0"
+                                  />
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    class="border-hister-indigo text-hister-indigo border-[2px] text-xs"
+                                    onclick={() =>
+                                      updatePriorityResult(r.url, r.title || '*title*', false)}
+                                  >
+                                    <Pin class="size-3.5" />
+                                    Pin
+                                  </Button>
+                                </div>
+                                <hr />
+                              </div>
+                              <SkipRuleActions
+                                onAddSkipRule={(type, deleteMatches) =>
+                                  addSkipRuleForResult(r.url, r.domain, type, deleteMatches)}
+                              />
+                              <hr />
                               <Button
                                 variant="outline"
                                 size="sm"
                                 class="border-hister-rose text-hister-rose hover:bg-hister-rose/10 w-full border-[2px] text-xs"
-                                onclick={() =>
-                                  updatePriorityResult(r.url, r.title || '*title*', true)}
+                                onclick={() => deleteResult(r.url)}
                               >
-                                <PinOff class="size-3.5" />
-                                Unpin
+                                <Trash2 class="size-3.5" />
+                                Delete result
                               </Button>
+                              {#if actionsMessage}
+                                <p
+                                  class="font-inter text-xs {actionsError
+                                    ? 'text-hister-rose'
+                                    : 'text-hister-teal'}"
+                                >
+                                  {actionsMessage}
+                                </p>
+                              {/if}
                             </div>
-                            <SkipRuleActions
-                              onAddSkipRule={(type, deleteMatches) =>
-                                addSkipRuleForResult(r.url, r.domain, type, deleteMatches)}
-                            />
-                            {#if actionsMessage}
-                              <p
-                                class="font-inter text-xs {actionsError
-                                  ? 'text-hister-rose'
-                                  : 'text-hister-teal'}"
-                              >
-                                {actionsMessage}
-                              </p>
-                            {/if}
-                          </div>
-                        </DropdownMenu.Content>
-                      </DropdownMenu.Root>
-                    </div>
-                    <div class="flex items-center gap-2">
-                      <span
-                        class="font-fira text-hister-teal truncate overflow-hidden text-ellipsis whitespace-nowrap"
-                        >{r.url}</span
-                      >
-                      <Badge
-                        variant="secondary"
-                        class="bg-hister-teal/10 text-hister-teal h-4 border-0 px-1.5 py-0"
-                        >pinned</Badge
-                      >
-                      <Button
-                        data-readable
-                        variant="link"
-                        size="sm"
-                        class="text-hister-indigo h-auto shrink-0 cursor-pointer gap-0.5 p-0 text-xs font-medium md:text-sm"
-                        onclick={(e) => {
-                          highlightIdx = i;
-                          openReadable(e, r.url, r.title || '*title*');
-                        }}
-                      >
-                        <Eye class="size-3" /><span>view</span>
-                      </Button>
-                    </div>
-                    {#if r.text}
-                      <p
-                        class="font-inter text-text-brand-secondary text-sm leading-[1.4] md:text-base"
-                      >
-                        {@html r.text}
-                      </p>
-                    {/if}
-                  </div>
-                </article>
-              {/each}
-            {/if}
-
-            {#if mergedResults.length > 0}
-              {#each mergedResults as r, i}
-                {@const idx = historyLen + i}
-                {@const color = 'hister-cyan'}
-                {@const favSrc = getFaviconSrc(r.favicon, r.url)}
-                {@const isSemOnly = r.sourceType === 'semantic'}
-                <article
-                  data-result
-                  class="flex w-full scroll-my-[6em] gap-3 overflow-hidden py-3.5 transition-all duration-150"
-                  style={idx === highlightIdx
-                    ? `background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--${color}) 12%, transparent), transparent); border-left: 3px solid var(--${color}); padding-left: 0.75rem;`
-                    : ''}
-                >
-                  <div class="w-0 min-w-0 flex-1 space-y-0.5">
-                    <div class="flex items-center gap-1.5">
-                      <div
-                        class="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden"
-                        style="background-color: var(--{color});"
-                      >
-                        {#if favSrc}
-                          <img
-                            src={favSrc}
-                            alt=""
-                            class="h-full w-full object-cover"
-                            onload={(e) => {
-                              (e.target as HTMLImageElement).parentElement!.style.backgroundColor =
-                                'transparent';
-                            }}
-                            onerror={(e) => {
-                              (e.target as HTMLImageElement).style.display = 'none';
-                              (e.target as HTMLImageElement).nextElementSibling?.classList.remove(
-                                'hidden',
-                              );
-                            }}
-                          />
-                          <Globe class="hidden size-3 text-white" />
-                        {:else}
-                          <Globe class="size-3 text-white" />
+                          </DropdownMenu.Content>
+                        </DropdownMenu.Root>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <span
+                          class="font-fira text-hister-teal truncate overflow-hidden text-xs text-ellipsis whitespace-nowrap md:text-sm"
+                          >{r.url}</span
+                        >
+                        {#if r.added}
+                          <span
+                            class="font-inter text-text-brand-muted text-xs whitespace-nowrap md:text-sm"
+                            title={formatTimestamp(r.added)}>· {formatRelativeTime(r.added)}</span
+                          >
+                        {/if}
+                        <Button
+                          data-readable
+                          variant="link"
+                          size="sm"
+                          class="text-hister-indigo h-auto shrink-0 cursor-pointer gap-0.5 p-0 text-xs font-medium md:text-sm"
+                          onclick={(e) => {
+                            highlightIdx = idx;
+                            openReadable(e, r.url, r.title || '*title*');
+                          }}
+                        >
+                          <Eye class="size-3" /><span>view</span>
+                        </Button>
+                        {#if r.finalScore && config.semanticEnabled && semanticOn}
+                          <Tooltip.Provider delayDuration={0}>
+                            <Tooltip.Root>
+                              <Tooltip.Trigger>
+                                <Badge
+                                  variant="secondary"
+                                  class="bg-hister-indigo/10 text-hister-indigo shrink-0 border-0 px-1.5 py-0 align-middle font-mono text-[10px]"
+                                  >{r.finalScore?.toFixed(2)}</Badge
+                                >
+                              </Tooltip.Trigger>
+                              <Tooltip.Portal>
+                                <Tooltip.Content>
+                                  Result score: {r.finalScore?.toFixed(2)}
+                                </Tooltip.Content>
+                              </Tooltip.Portal>
+                            </Tooltip.Root>
+                          </Tooltip.Provider>
                         {/if}
                       </div>
-                      <a
-                        data-result-link={r.url}
-                        href={fileResultUrl(r.url)}
-                        class="font-outfit text-md min-w-0 flex-1 font-semibold hover:underline md:text-xl"
-                        style="color: var(--{color});"
-                        target={config.openResultsOnNewTab ? '_blank' : undefined}
-                        onclick={() => {
-                          sendHistoryBeacon(r.url, r.title || '*title*', query);
-                        }}
-                        onauxclick={(e) => {
-                          if (e.button === 1) sendHistoryBeacon(r.url, r.title || '*title*', query);
-                        }}
-                      >
-                        {r.title || '*title*'}
-                      </a>
-                      <DropdownMenu.Root>
-                        <DropdownMenu.Trigger>
-                          {#snippet child({ props })}
-                            <Button
-                              {...props}
-                              variant="ghost"
-                              size="icon-sm"
-                              class="text-text-brand-muted hover:text-text-brand shrink-0 cursor-pointer"
-                              onclick={() => {
-                                actionsMessage = null;
-                                actionsError = false;
-                              }}
-                            >
-                              <MoreVertical class="size-4" />
-                            </Button>
-                          {/snippet}
-                        </DropdownMenu.Trigger>
-                        <DropdownMenu.Content
-                          class="border-brutal-border bg-card-surface w-100 rounded-none border-[3px] p-3 shadow-[4px_4px_0_var(--brutal-shadow)]"
+                      {#if r.text}
+                        <p
+                          class="font-inter text-text-brand-secondary text-sm leading-[1.4] md:text-base"
                         >
-                          <div class="space-y-3">
-                            <div class="space-y-2">
-                              <p
-                                class="font-outfit mb-1 text-xs font-bold tracking-widest uppercase"
-                              >
-                                Prioritize this result in query:
-                              </p>
-                              <div class="flex items-center gap-2">
-                                <Input
-                                  bind:value={actionsQuery}
-                                  placeholder="Query.."
-                                  size="sm"
-                                  class="font-inter border-border-brand-muted focus-visible:border-hister-indigo flex-1 border-[2px] text-sm shadow-none focus-visible:ring-0"
-                                />
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  class="border-hister-indigo text-hister-indigo border-[2px] text-xs"
-                                  onclick={() =>
-                                    updatePriorityResult(r.url, r.title || '*title*', false)}
-                                >
-                                  <Pin class="size-3.5" />
-                                  Pin
-                                </Button>
-                              </div>
-                              <hr />
-                            </div>
-                            <SkipRuleActions
-                              onAddSkipRule={(type, deleteMatches) =>
-                                addSkipRuleForResult(r.url, r.domain, type, deleteMatches)}
-                            />
-                            <hr />
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              class="border-hister-rose text-hister-rose hover:bg-hister-rose/10 w-full border-[2px] text-xs"
-                              onclick={() => deleteResult(r.url)}
-                            >
-                              <Trash2 class="size-3.5" />
-                              Delete result
-                            </Button>
-                            {#if actionsMessage}
-                              <p
-                                class="font-inter text-xs {actionsError
-                                  ? 'text-hister-rose'
-                                  : 'text-hister-teal'}"
-                              >
-                                {actionsMessage}
-                              </p>
-                            {/if}
-                          </div>
-                        </DropdownMenu.Content>
-                      </DropdownMenu.Root>
-                    </div>
-                    <div class="flex items-center gap-2">
-                      <span
-                        class="font-fira text-hister-teal truncate overflow-hidden text-xs text-ellipsis whitespace-nowrap md:text-sm"
-                        >{r.url}</span
-                      >
-                      {#if r.added}
-                        <span
-                          class="font-inter text-text-brand-muted text-xs whitespace-nowrap md:text-sm"
-                          title={formatTimestamp(r.added)}>· {formatRelativeTime(r.added)}</span
-                        >
-                      {/if}
-                      <Button
-                        data-readable
-                        variant="link"
-                        size="sm"
-                        class="text-hister-indigo h-auto shrink-0 cursor-pointer gap-0.5 p-0 text-xs font-medium md:text-sm"
-                        onclick={(e) => {
-                          highlightIdx = idx;
-                          openReadable(e, r.url, r.title || '*title*');
-                        }}
-                      >
-                        <Eye class="size-3" /><span>view</span>
-                      </Button>
-                      {#if r.finalScore && config.semanticEnabled && semanticOn}
-                        <Tooltip.Provider delayDuration={0}>
-                          <Tooltip.Root>
-                            <Tooltip.Trigger>
-                              <Badge
-                                variant="secondary"
-                                class="bg-hister-indigo/10 text-hister-indigo shrink-0 border-0 px-1.5 py-0 align-middle font-mono text-[10px]"
-                                >{r.finalScore?.toFixed(2)}</Badge
-                              >
-                            </Tooltip.Trigger>
-                            <Tooltip.Portal>
-                              <Tooltip.Content>
-                                Result score: {r.finalScore?.toFixed(2)}
-                              </Tooltip.Content>
-                            </Tooltip.Portal>
-                          </Tooltip.Root>
-                        </Tooltip.Provider>
+                          {@html r.text}
+                        </p>
                       {/if}
                     </div>
-                    {#if r.text}
-                      <p
-                        class="font-inter text-text-brand-secondary text-sm leading-[1.4] md:text-base"
-                      >
-                        {@html r.text}
-                      </p>
-                    {/if}
-                  </div>
-                </article>
-              {/each}
+                  </article>
+                {/each}
+              {/if}
+            {:else if query && lastResults}
+              <section class="pmd:px-12 y-12 text-center">
+                <p class="font-inter text-text-brand-secondary mb-4">
+                  No results found for "<span class="font-semibold">{query}</span>"
+                </p>
+                <Button
+                  variant="outline"
+                  class="border-hister-coral text-hister-coral hover:bg-hister-coral/10 font-inter border-[3px] font-semibold shadow-[3px_3px_0px_var(--hister-coral)]"
+                  href={getSearchUrl(config.searchUrl, query)}
+                >
+                  <ExternalLink class="size-4" />
+                  Search
+                </Button>
+              </section>
+            {:else if query}
+              <div class="flex items-center justify-center py-16">
+                <span class="font-inter text-text-brand-muted">Searching...</span>
+              </div>
             {/if}
-          {:else if query && lastResults}
-            <section class="pmd:px-12 y-12 text-center">
-              <p class="font-inter text-text-brand-secondary mb-4">
-                No results found for "<span class="font-semibold">{query}</span>"
-              </p>
-              <Button
-                variant="outline"
-                class="border-hister-coral text-hister-coral hover:bg-hister-coral/10 font-inter border-[3px] font-semibold shadow-[3px_3px_0px_var(--hister-coral)]"
-                href={getSearchUrl(config.searchUrl, query)}
-              >
-                <ExternalLink class="size-4" />
-                Search
-              </Button>
-            </section>
-          {:else if query}
-            <div class="flex items-center justify-center py-16">
-              <span class="font-inter text-text-brand-muted">Searching...</span>
-            </div>
-          {/if}
-          {#if hasMore || loadingMoreForQuery}
-            <div bind:this={sentinelEl} class="flex items-center justify-center py-4">
-              <span class="font-inter text-text-brand-muted text-sm">Loading more…</span>
-            </div>
-          {:else if hasResults}
-            <div bind:this={sentinelEl}></div>
-          {/if}
-        </div>
-      </ScrollArea>
+            {#if hasMore || loadingMoreForQuery}
+              <div bind:this={sentinelEl} class="flex items-center justify-center py-4">
+                <span class="font-inter text-text-brand-muted text-sm">Loading more…</span>
+              </div>
+            {:else if hasResults}
+              <div bind:this={sentinelEl}></div>
+            {/if}
+          </div>
+        </ScrollArea>
+      {/if}
 
-      <!-- Desktop-only readability panel (right column) -->
-      {#if lastResults && panelOpen && isDesktop}
+      <!-- Preview panel: fullscreen (both mobile and desktop) or split-pane (desktop only) -->
+      {#if previewFullscreen}
         <PreviewPanel
           url={panelUrl}
           hintTitle={panelHintTitle}
+          fullscreen={true}
+          onclose={closePanelAndFullscreen}
+          onfullscreentoggle={isDesktop ? exitFullscreen : undefined}
+        />
+      {:else if lastResults && panelOpen && isDesktop}
+        <PreviewPanel
+          url={panelUrl}
+          hintTitle={panelHintTitle}
+          fullscreen={false}
           onclose={() => {
             panelOpen = false;
             localStorage.setItem('hister-panel-open', 'false');
           }}
+          onfullscreentoggle={enterFullscreen}
         />
       {/if}
     </div>

@@ -5,15 +5,17 @@
   import { formatTimestamp, formatMetaDate } from '$lib/search';
   import { ScrollArea } from '@hister/components/ui/scroll-area';
   import { Button } from '@hister/components/ui/button';
-  import { Eye, X } from 'lucide-svelte';
+  import { Eye, X, Maximize2, Minimize2 } from 'lucide-svelte';
 
   interface Props {
     url: string;
     hintTitle?: string;
     onclose: () => void;
+    fullscreen?: boolean;
+    onfullscreentoggle?: () => void;
   }
 
-  let { url, hintTitle = '', onclose }: Props = $props();
+  let { url, hintTitle = '', onclose, fullscreen = false, onfullscreentoggle }: Props = $props();
 
   let title = $state('');
   let content = $state('');
@@ -67,12 +69,29 @@
 </script>
 
 <div
-  class="border-border-brand bg-card-surface flex flex-1 shrink-0 flex-col overflow-hidden border-l-[3px]"
+  class="border-border-brand bg-card-surface flex flex-1 flex-col overflow-hidden {fullscreen
+    ? ''
+    : 'shrink-0 border-l-[3px]'}"
 >
   {#if loading}
     <div
-      class="border-border-brand-muted flex shrink-0 items-center justify-end border-b-[2px] px-2 py-1"
+      class="border-border-brand-muted flex shrink-0 items-center justify-end gap-1 border-b-[2px] px-2 py-1"
     >
+      {#if onfullscreentoggle}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="text-text-brand-muted hover:text-text-brand"
+          onclick={onfullscreentoggle}
+          title={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        >
+          {#if fullscreen}
+            <Minimize2 class="size-4" />
+          {:else}
+            <Maximize2 class="size-4" />
+          {/if}
+        </Button>
+      {/if}
       <Button
         variant="ghost"
         size="icon-sm"
@@ -116,14 +135,31 @@
           </p>
         {/if}
       </div>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        class="text-text-brand-muted hover:text-text-brand mt-1 shrink-0"
-        onclick={onclose}
-      >
-        <X class="size-4" />
-      </Button>
+      <div class="mt-1 flex shrink-0 items-center gap-1">
+        {#if onfullscreentoggle}
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            class="text-text-brand-muted hover:text-text-brand"
+            onclick={onfullscreentoggle}
+            title={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+          >
+            {#if fullscreen}
+              <Minimize2 class="size-4" />
+            {:else}
+              <Maximize2 class="size-4" />
+            {/if}
+          </Button>
+        {/if}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="text-text-brand-muted hover:text-text-brand"
+          onclick={onclose}
+        >
+          <X class="size-4" />
+        </Button>
+      </div>
     </div>
     <ScrollArea class="min-h-0 flex-1">
       <div
@@ -153,8 +189,23 @@
     </ScrollArea>
   {:else}
     <div
-      class="border-border-brand-muted flex shrink-0 items-center justify-end border-b-[2px] px-2 py-1"
+      class="border-border-brand-muted flex shrink-0 items-center justify-end gap-1 border-b-[2px] px-2 py-1"
     >
+      {#if onfullscreentoggle}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="text-text-brand-muted hover:text-text-brand"
+          onclick={onfullscreentoggle}
+          title={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        >
+          {#if fullscreen}
+            <Minimize2 class="size-4" />
+          {:else}
+            <Maximize2 class="size-4" />
+          {/if}
+        </Button>
+      {/if}
       <Button
         variant="ghost"
         size="icon-sm"
