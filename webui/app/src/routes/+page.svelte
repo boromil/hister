@@ -615,6 +615,9 @@
     panelHintTitle = title;
     previewFullscreen = true;
     withSkipUrl(skipUrl, () => pushPreviewHistory(url, title));
+  }
+
+  function enterFullscreen() {
     previewFullscreen = true;
     withSkipUrl(skipUrl, () => pushPreviewHistory(panelUrl, panelHintTitle));
   }
