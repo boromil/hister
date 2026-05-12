@@ -5,7 +5,6 @@ webui/ext/hister_ext_src.zip
 webui/ext/hister_ext_ff.zip
 webui/ext/hister_ext_chrome.zip
 result
-result-*
 node_modules/
 dist/
 .fallow/
