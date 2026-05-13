@@ -73,6 +73,7 @@ func automigrate() error {
 		&User{},
 		&CrawlJob{},
 		&CrawlURL{},
+		&DocumentVersion{},
 	)
 }
 

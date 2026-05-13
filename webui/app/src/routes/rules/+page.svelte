@@ -15,15 +15,16 @@
   interface RulesData {
     skip: string[];
     priority: string[];
+    versioning: string[];
     aliases: Record<string, string>;
   }
 
   interface RuleRow {
     pattern: string;
-    type: 'skip' | 'priority';
+    type: 'skip' | 'priority' | 'versioning';
   }
 
-  let rules: RulesData = $state({ skip: [], priority: [], aliases: {} });
+  let rules: RulesData = $state({ skip: [], priority: [], versioning: [], aliases: {} });
   let loading = $state(true);
   let saving = $state(false);
   let message = $state('');
@@ -31,7 +32,7 @@
   let newAliasKeyword = $state('');
   let newAliasValue = $state('');
   let newRulePattern = $state('');
-  let newRuleType: 'skip' | 'priority' = $state('skip');
+  let newRuleType: 'skip' | 'priority' | 'versioning' = $state('skip');
 
   // Editing state for aliases
   let editingAliasKey = $state<string | null>(null);
@@ -41,12 +42,13 @@
   // Editing state for rules
   let editingRuleIndex = $state<number | null>(null);
   let editRulePattern = $state('');
-  let editRuleType: 'skip' | 'priority' = $state('skip');
+  let editRuleType: 'skip' | 'priority' | 'versioning' = $state('skip');
 
   const ruleRows = $derived.by(() => {
     const rows: RuleRow[] = [];
     for (const p of rules.skip) rows.push({ pattern: p, type: 'skip' });
     for (const p of rules.priority) rows.push({ pattern: p, type: 'priority' });
+    for (const p of rules.versioning) rows.push({ pattern: p, type: 'versioning' });
     return rows;
   });
 
@@ -60,7 +62,13 @@
     try {
       const res = await apiFetch('/rules', { headers: { Accept: 'application/json' } });
       if (!res.ok) throw new Error('Failed to load rules');
-      rules = await res.json();
+      const data = await res.json();
+      rules = {
+        skip: data.skip ?? [],
+        priority: data.priority ?? [],
+        versioning: data.versioning ?? [],
+        aliases: data.aliases ?? {},
+      };
     } catch (e) {
       message = String(e);
       isError = true;
@@ -77,6 +85,7 @@
       const formData = new URLSearchParams();
       formData.set('skip', rules.skip.join('\n'));
       formData.set('priority', rules.priority.join('\n'));
+      formData.set('versioning', rules.versioning.join('\n'));
       const res = await apiFetch('/rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -94,11 +103,13 @@
     }
   }
 
-  function removeRule(pattern: string, type: 'skip' | 'priority') {
+  function removeRule(pattern: string, type: 'skip' | 'priority' | 'versioning') {
     if (type === 'skip') {
       rules.skip = rules.skip.filter((p) => p !== pattern);
-    } else {
+    } else if (type === 'priority') {
       rules.priority = rules.priority.filter((p) => p !== pattern);
+    } else {
+      rules.versioning = rules.versioning.filter((p) => p !== pattern);
     }
     saveRules();
   }
@@ -106,15 +117,17 @@
   function addRule() {
     if (!newRulePattern.trim()) return;
     const pattern = newRulePattern.trim();
-    if (rules.skip.includes(pattern) || rules.priority.includes(pattern)) {
+    if (rules.skip.includes(pattern) || rules.priority.includes(pattern) || rules.versioning.includes(pattern)) {
       message = `Rule "${pattern}" already exists.`;
       isError = true;
       return;
     }
     if (newRuleType === 'skip') {
       rules.skip = [...rules.skip, pattern];
-    } else {
+    } else if (newRuleType === 'priority') {
       rules.priority = [...rules.priority, pattern];
+    } else {
+      rules.versioning = [...rules.versioning, pattern];
     }
     newRulePattern = '';
     saveRules();
@@ -223,7 +236,7 @@
     const row = ruleRows[editingRuleIndex!];
     // Reject if the new pattern already exists elsewhere (different item)
     const isDuplicate =
-      (rules.skip.includes(trimmed) || rules.priority.includes(trimmed)) && trimmed !== row.pattern;
+      (rules.skip.includes(trimmed) || rules.priority.includes(trimmed) || rules.versioning.includes(trimmed)) && trimmed !== row.pattern;
     if (isDuplicate) {
       message = `Rule "${trimmed}" already exists.`;
       isError = true;
@@ -233,17 +246,28 @@
     // Update in the appropriate array
     if (row.type === 'skip') {
       rules.skip = rules.skip.map((p) => (p === row.pattern ? trimmed : p));
-    } else {
+    } else if (row.type === 'priority') {
       rules.priority = rules.priority.map((p) => (p === row.pattern ? trimmed : p));
+    } else {
+      rules.versioning = rules.versioning.map((p) => (p === row.pattern ? trimmed : p));
     }
     // If type changed, move between arrays
     if (editRuleType !== row.type) {
+      // Remove from old array
       if (row.type === 'skip') {
         rules.skip = rules.skip.filter((p) => p !== trimmed);
+      } else if (row.type === 'priority') {
+        rules.priority = rules.priority.filter((p) => p !== trimmed);
+      } else {
+        rules.versioning = rules.versioning.filter((p) => p !== trimmed);
+      }
+      // Add to new array
+      if (editRuleType === 'skip') {
+        rules.skip = [...rules.skip, trimmed];
+      } else if (editRuleType === 'priority') {
         rules.priority = [...rules.priority, trimmed];
       } else {
-        rules.priority = rules.priority.filter((p) => p !== trimmed);
-        rules.skip = [...rules.skip, trimmed];
+        rules.versioning = [...rules.versioning, trimmed];
       }
     }
     editingRuleIndex = null;
@@ -566,6 +590,7 @@
               >
                 <option value="skip">SKIP</option>
                 <option value="priority">PRIORITY</option>
+                <option value="versioning">VERSION</option>
               </select>
             </div>
             <Button
@@ -620,6 +645,7 @@
                           >
                             <option value="skip">SKIP</option>
                             <option value="priority">PRIORITY</option>
+                            <option value="versioning">VERSION</option>
                           </select>
                         </div>
                       </Table.Cell>
@@ -654,9 +680,11 @@
                           class="font-space border-0 px-3 py-1 text-xs font-bold tracking-[0.5px] {row.type ===
                           'skip'
                             ? 'bg-hister-rose text-white'
-                            : 'bg-hister-teal text-white'}"
+                            : row.type === 'priority'
+                              ? 'bg-hister-teal text-white'
+                              : 'bg-violet-500 text-white'}"
                         >
-                          {row.type === 'skip' ? 'SKIP' : 'PRIORITY'}
+                          {row.type === 'skip' ? 'SKIP' : row.type === 'priority' ? 'PRIORITY' : 'VERSION'}
                         </Badge>
                       </Table.Cell>
                       <Table.Cell class="w-20 px-3 py-3">
@@ -704,6 +732,7 @@
                     >
                       <option value="skip">SKIP</option>
                       <option value="priority">PRIORITY</option>
+                      <option value="versioning">VERSION</option>
                     </select>
                   </div>
                   <div class="flex items-center gap-1">
@@ -735,9 +764,11 @@
                     class="font-space shrink-0 border-0 px-2.5 py-0.5 text-xs font-bold tracking-[0.5px] {row.type ===
                     'skip'
                       ? 'bg-hister-rose text-white'
-                      : 'bg-hister-teal text-white'}"
+                      : row.type === 'priority'
+                        ? 'bg-hister-teal text-white'
+                        : 'bg-violet-500 text-white'}"
                   >
-                    {row.type === 'skip' ? 'SKIP' : 'PRIORITY'}
+                    {row.type === 'skip' ? 'SKIP' : row.type === 'priority' ? 'PRIORITY' : 'VERSION'}
                   </Badge>
                   <Button
                     variant="ghost"

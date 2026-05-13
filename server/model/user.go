@@ -32,9 +32,10 @@ type User struct {
 
 func (u *User) ParseRules() (*config.Rules, error) {
 	r := &config.Rules{
-		Skip:     &config.Rule{ReStrs: []string{}},
-		Priority: &config.Rule{ReStrs: []string{}},
-		Aliases:  make(config.Aliases),
+		Skip:       &config.Rule{ReStrs: []string{}},
+		Priority:   &config.Rule{ReStrs: []string{}},
+		Versioning: &config.Rule{ReStrs: []string{}},
+		Aliases:    make(config.Aliases),
 	}
 	if u.RulesJSON != "" && u.RulesJSON != "{}" {
 		if err := json.Unmarshal([]byte(u.RulesJSON), r); err != nil {
@@ -45,6 +46,9 @@ func (u *User) ParseRules() (*config.Rules, error) {
 		}
 		if r.Priority == nil {
 			r.Priority = &config.Rule{ReStrs: []string{}}
+		}
+		if r.Versioning == nil {
+			r.Versioning = &config.Rule{ReStrs: []string{}}
 		}
 		if r.Aliases == nil {
 			r.Aliases = make(config.Aliases)

@@ -123,9 +123,10 @@ type Hotkeys struct {
 }
 
 type Rules struct {
-	Skip     *Rule   `json:"skip"`
-	Priority *Rule   `json:"priority"`
-	Aliases  Aliases `json:"aliases"`
+	Skip       *Rule   `json:"skip"`
+	Priority   *Rule   `json:"priority"`
+	Versioning *Rule   `json:"versioning"`
+	Aliases    Aliases `json:"aliases"`
 }
 
 type Rule struct {
@@ -811,6 +812,9 @@ func (c *Config) LoadRules() error {
 	if c.Rules.Priority == nil {
 		c.Rules.Priority = &Rule{ReStrs: make([]string, 0)}
 	}
+	if c.Rules.Versioning == nil {
+		c.Rules.Versioning = &Rule{ReStrs: make([]string, 0)}
+	}
 	if c.Rules.Aliases == nil {
 		c.Rules.Aliases = make(Aliases)
 	}
@@ -824,9 +828,10 @@ func (c *Config) SaveRules() error {
 	}
 	if c.Rules == nil {
 		c.Rules = &Rules{
-			Skip:     &Rule{ReStrs: make([]string, 0)},
-			Priority: &Rule{ReStrs: make([]string, 0)},
-			Aliases:  make(Aliases),
+			Skip:       &Rule{ReStrs: make([]string, 0)},
+			Priority:   &Rule{ReStrs: make([]string, 0)},
+			Versioning: &Rule{ReStrs: make([]string, 0)},
+			Aliases:    make(Aliases),
 		}
 	}
 	e := json.NewEncoder(f)
@@ -846,6 +851,13 @@ func (r *Rules) IsPriority(s string) bool {
 		return false
 	}
 	return r.Priority.Match(s)
+}
+
+func (r *Rules) IsVersioning(s string) bool {
+	if r == nil || r.Versioning == nil {
+		return false
+	}
+	return r.Versioning.Match(s)
 }
 
 func (r *Rules) IsSkip(s string) bool {
@@ -889,7 +901,7 @@ func (r *Rule) UnmarshalJSON(data []byte) error {
 }
 
 func (r *Rules) Count() int {
-	return len(r.Skip.ReStrs) + len(r.Priority.ReStrs)
+	return len(r.Skip.ReStrs) + len(r.Priority.ReStrs) + len(r.Versioning.ReStrs)
 }
 
 func (r *Rules) Compile() error {
@@ -897,6 +909,9 @@ func (r *Rules) Compile() error {
 		return err
 	}
 	if err := r.Priority.Compile(); err != nil {
+		return err
+	}
+	if err := r.Versioning.Compile(); err != nil {
 		return err
 	}
 	return nil

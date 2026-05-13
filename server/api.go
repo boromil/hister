@@ -200,6 +200,17 @@ func init() {
 			},
 		},
 		{
+			Name:         "Document versions",
+			Path:         "/api/versions",
+			Method:       GET,
+			CSRFRequired: false,
+			Handler:      serveVersions,
+			Description:  "Return all stored version diffs for a document URL. Versions are recorded when the URL matches a versioning rule and the document is re-indexed.",
+			Args: []*EndpointArg{
+				{Name: "url", Type: "string", Required: true, Description: "URL of the document to retrieve versions for"},
+			},
+		},
+		{
 			Name:         "Get document",
 			Path:         "/api/document",
 			Method:       GET,
@@ -224,10 +235,11 @@ func init() {
 			Method:       POST,
 			CSRFRequired: true,
 			Handler:      serveRules,
-			Description:  "Update skip/priority rules. Accepts application/x-www-form-urlencoded.",
+			Description:  "Update skip/priority/versioning rules. Accepts application/x-www-form-urlencoded.",
 			Args: []*EndpointArg{
 				{Name: "skip", Type: "string", Required: false, Description: "Space-separated list of URL regex patterns to skip during indexing"},
 				{Name: "priority", Type: "string", Required: false, Description: "Space-separated list of URL regex patterns to surface first in results"},
+				{Name: "versioning", Type: "string", Required: false, Description: "Space-separated list of URL regex patterns for which document versions are tracked"},
 			},
 		},
 		{

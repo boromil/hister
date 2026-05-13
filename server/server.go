@@ -32,6 +32,7 @@ import (
 	"github.com/gorilla/sessions"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 // Version is set by the main package before Listen() is called so that MCP
@@ -372,7 +373,7 @@ func withCSRF(handler endpointHandler) endpointHandler {
 			return
 		}
 		// Allow add, config requests from the addons
-		for _, p := range []string{"/add", "/api/add", "/api/add_pdf", "/api/config", "/api/rules", "/api/delete", "/api/label"} {
+		for _, p := range []string{"/add", "/api/add", "/api/add_pdf", "/api/config", "/api/rules", "/api/delete", "/api/label", "/api/versions"} {
 			if c.Request.URL.Path != c.Config.BasePathPrefix()+p {
 				continue
 			}
@@ -817,6 +818,45 @@ func doSearch(query *indexer.Query, cfg *config.Config, rules *config.Rules, use
 	return res, nil
 }
 
+// computeDocumentDiff returns a diff-match-patch patch string representing the
+// changes between old and new. It diffs HTML when both documents have HTML,
+// otherwise it diffs the plain text fields. Returns an empty string when the
+// content is identical.
+// computeDocumentDiff returns unified diff-match-patch patch strings for the
+// HTML and Text fields independently. Either return value may be empty when
+// the corresponding content is absent or identical between the two versions.
+func computeDocumentDiff(old, new *document.Document) (htmlDiff, textDiff string) {
+	dmp := diffmatchpatch.New()
+	makePatch := func(oldContent, newContent string) string {
+		if oldContent == newContent {
+			return ""
+		}
+		diffs := dmp.DiffMain(oldContent, newContent, true)
+		dmp.DiffCleanupSemantic(diffs)
+		return dmp.PatchToText(dmp.PatchMake(oldContent, diffs))
+	}
+	htmlDiff = makePatch(old.HTML, new.HTML)
+	textDiff = makePatch(old.Text, new.Text)
+	return
+}
+
+// serveVersions returns all stored version diffs for a given URL and the
+// authenticated user (or user 0 when user handling is disabled).
+func serveVersions(c *webContext) {
+	u := c.Request.URL.Query().Get("url")
+	if u == "" {
+		http.Error(c.Response, "url parameter is required", http.StatusBadRequest)
+		return
+	}
+	versions, err := model.GetDocumentVersions(u, c.UserID)
+	if err != nil {
+		log.Error().Err(err).Str("url", u).Msg("failed to get document versions")
+		serve500(c)
+		return
+	}
+	c.JSON(versions)
+}
+
 func serveAdd(c *webContext) {
 	m := c.Request.Method
 	if m == http.MethodGet {
@@ -856,6 +896,11 @@ func serveAdd(c *webContext) {
 				}
 			}
 		}
+		rules := c.effectiveRules()
+		var existingDoc *document.Document
+		if rules.IsVersioning(d.URL) {
+			existingDoc = indexer.GetByURLAndUser(d.URL, d.UserID)
+		}
 		err := indexer.Add(d)
 		if err != nil {
 			if errors.Is(err, document.ErrSensitiveContent) {
@@ -866,6 +911,14 @@ func serveAdd(c *webContext) {
 			log.Error().Err(err).Str("URL", d.URL).Msg("failed to create index")
 			serve500(c)
 			return
+		}
+		if existingDoc != nil {
+			htmlDiff, textDiff := computeDocumentDiff(existingDoc, d)
+			if htmlDiff != "" || textDiff != "" {
+				if err := model.SaveDocumentVersion(d.URL, d.UserID, htmlDiff, textDiff); err != nil {
+					log.Warn().Err(err).Str("url", d.URL).Msg("failed to save document version")
+				}
+			}
 		}
 		log.Debug().Str("URL", d.URL).Msg("item added to index")
 		c.Response.WriteHeader(http.StatusCreated)
@@ -1036,9 +1089,10 @@ func serveRules(c *webContext) {
 	rules := c.effectiveRules()
 	if m == http.MethodGet {
 		type rulesResponse struct {
-			Skip     []string          `json:"skip"`
-			Priority []string          `json:"priority"`
-			Aliases  map[string]string `json:"aliases"`
+			Skip       []string          `json:"skip"`
+			Priority   []string          `json:"priority"`
+			Versioning []string          `json:"versioning"`
+			Aliases    map[string]string `json:"aliases"`
 		}
 		skip := rules.Skip.ReStrs
 		if skip == nil {
@@ -1048,11 +1102,15 @@ func serveRules(c *webContext) {
 		if priority == nil {
 			priority = []string{}
 		}
+		versioning := rules.Versioning.ReStrs
+		if versioning == nil {
+			versioning = []string{}
+		}
 		aliases := map[string]string(rules.Aliases)
 		if aliases == nil {
 			aliases = make(map[string]string)
 		}
-		c.JSON(rulesResponse{Skip: skip, Priority: priority, Aliases: aliases})
+		c.JSON(rulesResponse{Skip: skip, Priority: priority, Versioning: versioning, Aliases: aliases})
 		return
 	}
 	if m != http.MethodPost {
@@ -1067,6 +1125,10 @@ func serveRules(c *webContext) {
 	f := c.Request.PostForm
 	rules.Skip.ReStrs = uniqueStrings(strings.Fields(f.Get("skip")))
 	rules.Priority.ReStrs = uniqueStrings(strings.Fields(f.Get("priority")))
+	if rules.Versioning == nil {
+		rules.Versioning = &config.Rule{ReStrs: make([]string, 0)}
+	}
+	rules.Versioning.ReStrs = uniqueStrings(strings.Fields(f.Get("versioning")))
 	if err := rules.Compile(); err != nil {
 		log.Error().Err(err).Msg("failed to compile rules")
 		serve500(c)
