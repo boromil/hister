@@ -291,26 +291,8 @@
   <div class="flex flex-col gap-4">
     <PageHeader color="hister-coral" size="lg" class="uppercase">Rules &amp; Aliases</PageHeader>
     <p class="font-inter text-text-brand-secondary max-w-175 text-base leading-relaxed md:text-lg">
-      Configure how Hister indexes and searches your browsing history.
+      Configure Hister rules
     </p>
-    <div class="flex items-center gap-3 md:gap-4">
-      <div
-        class="border-brutal-border shadow-brutal-sm flex items-center gap-2 border-[3px] px-4 py-2"
-        style="color: var(--hister-coral);"
-      >
-        <Shield class="size-4.5" />
-        <span class="font-outfit text-xl font-extrabold">{ruleRows.length}</span>
-        <span class="font-inter text-sm">rules</span>
-      </div>
-      <div
-        class="border-brutal-border shadow-brutal-sm flex items-center gap-2 border-[3px] px-4 py-2"
-        style="color: var(--hister-indigo);"
-      >
-        <Link2 class="size-4.5" />
-        <span class="font-outfit text-xl font-extrabold">{Object.keys(rules.aliases).length}</span>
-        <span class="font-inter text-sm">aliases</span>
-      </div>
-    </div>
   </div>
 
   {#if message}
@@ -507,7 +489,7 @@
               <a
                 href="https://pkg.go.dev/regexp/syntax"
                 target="_blank"
-                class="underline opacity-80 hover:opacity-100">Go regexp</a
+                class="text-page-bg underline opacity-80 hover:opacity-100">Go regexp</a
               > syntax</Card.Description
             >
           </div>
@@ -529,9 +511,9 @@
                 bind:value={newRuleType}
                 class="bg-card-surface border-brutal-border font-space text-text-brand h-10 w-25 shrink-0 cursor-pointer appearance-none border-[3px] px-3 text-center text-xs font-bold tracking-[0.5px] outline-none md:w-27.5"
               >
-                <option value="skip">skip</option>
-                <option value="priority">priority</option>
-                <option value="versioning">version</option>
+                <option value="skip">SKIP</option>
+                <option value="priority">PRIORITY</option>
+                <option value="versioning">VERSION</option>
               </select>
             </div>
             <Button
@@ -583,9 +565,9 @@
                           bind:value={editRuleType}
                           class="bg-card-surface border-brutal-border font-space text-text-brand h-8 w-20 shrink-0 cursor-pointer appearance-none border-[3px] px-2 text-center text-xs font-bold tracking-[0.5px] outline-none md:w-25 md:px-3"
                         >
-                          <option value="skip">skip</option>
-                          <option value="priority">priority</option>
-                          <option value="versioning">version</option>
+                          <option value="skip">SKIP</option>
+                          <option value="priority">PRIORITY</option>
+                          <option value="versioning">VERSION</option>
                         </select>
                       </div>
                     </Table.Cell>
