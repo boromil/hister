@@ -1135,9 +1135,9 @@ func initConfig() {
 
 func initLog() {
 	switch cfg.App.LogLevel {
-	case "error":
+	case "error", "err":
 		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
-	case "warning":
+	case "warning", "warn":
 		zerolog.SetGlobalLevel(zerolog.WarnLevel)
 	case "info":
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
