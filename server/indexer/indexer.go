@@ -40,12 +40,13 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-var Version = 7
+var Version = 8
 
 type indexer struct {
 	idx               bleve.IndexAlias       // used only for Search()
 	indexers          map[string]bleve.Index // default and language specific indexers
 	dir               string
+	dataDir           string
 	langDetector      document.LanguageDetector
 	reindexInProgress bool
 	embedder          *vectorstore.Embedder
@@ -277,6 +278,7 @@ func initializeIndexer(basePath string, detectLanguages bool) (*indexer, error) 
 		dir:         basePath,
 		embedCtx:    embedCtx,
 		embedCancel: embedCancel,
+		dataDir:     filepath.Join(basePath, dataDirName),
 	}
 	if !detectLanguages {
 		i.langDetector = document.NewNullLanguageDetector()
@@ -330,6 +332,11 @@ func Reindex(basePath string, rules *config.Rules, skipSensitiveChecks bool, det
 	if err != nil {
 		return err
 	}
+	// The data directory is shared between the live and temp indexers so that
+	// content-addressed files written during reindex are immediately usable
+	// after the rename step. No data directory rename is needed.
+	dataDir := filepath.Join(basePath, dataDirName)
+	tmpIdx.dataDir = dataDir
 
 	// Carry the vector store and embedder into the temporary indexer so that
 	// MultiBatch.Add() re-embeds every surviving document.  The vector store is
@@ -354,6 +361,10 @@ func Reindex(basePath string, rules *config.Rules, skipSensitiveChecks bool, det
 	req.Fields = allFields
 	req.Size = batchSize
 	req.SortBy([]string{"_id"})
+
+	referencedHTMLKeys := make(map[string]struct{})
+	referencedFaviconKeys := make(map[string]struct{})
+
 	for {
 		if len(sortKey) > 0 {
 			req.SetSearchAfter(sortKey)
@@ -365,7 +376,7 @@ func Reindex(basePath string, rules *config.Rules, skipSensitiveChecks bool, det
 		n := len(res.Hits)
 		b := newMultiBatch(tmpIdx)
 		for _, h := range res.Hits {
-			d := resFromHit(h, true, true)
+			d := idx.resFromHit(h, true, true)
 			if d.Type == types.Local {
 				pu, err := url.Parse(d.URL)
 				if err == nil {
@@ -412,6 +423,12 @@ func Reindex(basePath string, rules *config.Rules, skipSensitiveChecks bool, det
 				}
 				return err
 			}
+			if d.HTMLKey != "" {
+				referencedHTMLKeys[d.HTMLKey] = struct{}{}
+			}
+			if d.FaviconKey != "" {
+				referencedFaviconKeys[d.FaviconKey] = struct{}{}
+			}
 		}
 		if err := b.Save(); err != nil {
 			tmpIdx.Close()
@@ -455,7 +472,17 @@ func Reindex(basePath string, rules *config.Rules, skipSensitiveChecks bool, det
 		i.vectorStore = vs
 		i.embedder = embedder
 	}
-	return os.RemoveAll(tmpBasePath)
+	if err := os.RemoveAll(tmpBasePath); err != nil {
+		return err
+	}
+	// Remove data files no longer referenced by any document.
+	if err := cleanupDataSubdir(dataDir, htmlSubdir, referencedHTMLKeys); err != nil {
+		log.Warn().Err(err).Msg("failed to clean up orphaned HTML data files")
+	}
+	if err := cleanupDataSubdir(dataDir, faviconSubdir, referencedFaviconKeys); err != nil {
+		log.Warn().Err(err).Msg("failed to clean up orphaned favicon data files")
+	}
+	return nil
 }
 
 func DocumentCount() uint64 {
@@ -564,8 +591,34 @@ func (i *indexer) AddDocument(d *document.Document) error {
 }
 
 func (i *indexer) save(d *document.Document) error {
+	if err := i.prepareForStorage(d); err != nil {
+		return err
+	}
 	log.Debug().Str("URL", d.URL).Msg("item added to index")
 	return i.getOrCreate(d.Language).Index(d.ID(), d)
+}
+
+// prepareForStorage writes HTML and favicon to the data dir (if not already done)
+// and stores their SHA-256 hash keys on the document, clearing the inline fields
+// so that large blobs are not persisted inside the Bleve index.
+func (i *indexer) prepareForStorage(d *document.Document) error {
+	if d.HTML != "" && d.HTMLKey == "" {
+		key, err := writeData(i.dataDir, htmlSubdir, []byte(d.HTML))
+		if err != nil {
+			return fmt.Errorf("store HTML: %w", err)
+		}
+		d.HTMLKey = key
+		d.HTML = ""
+	}
+	if d.Favicon != "" && d.FaviconKey == "" {
+		key, err := writeData(i.dataDir, faviconSubdir, []byte(d.Favicon))
+		if err != nil {
+			return fmt.Errorf("store favicon: %w", err)
+		}
+		d.FaviconKey = key
+		d.Favicon = ""
+	}
+	return nil
 }
 
 // Saves a document without any processing
@@ -697,6 +750,9 @@ func (b *MultiBatch) Add(d *document.Document) error {
 	}
 	if b.indexer.embedder != nil && b.indexer.vectorStore != nil {
 		embedDocumentChunks(b.indexer.embedCtx, b.indexer, d)
+	}
+	if err := b.indexer.prepareForStorage(d); err != nil {
+		return err
 	}
 	idx := b.indexer.getOrCreate(d.Language)
 	return b.getOrCreateBatch(idx.Name(), idx).Index(d.ID(), d)
@@ -843,7 +899,7 @@ func Search(cfg *config.Config, q *Query) (*Results, error) {
 	}
 	matches := make([]*document.Document, len(res.Hits))
 	for j, v := range res.Hits {
-		matches[j] = resFromHit(v, q.IncludeText, q.IncludeHTML)
+		matches[j] = i.resFromHit(v, q.IncludeText, q.IncludeHTML)
 	}
 	r := &Results{
 		Total:     res.Total,
@@ -965,7 +1021,7 @@ func GetByDocID(id string) *document.Document {
 	if err != nil || len(res.Hits) < 1 {
 		return nil
 	}
-	return resFromHit(res.Hits[0], true, true)
+	return i.resFromHit(res.Hits[0], true, true)
 }
 
 func getLabel(id string) string {
@@ -999,14 +1055,14 @@ func Iterate(fn func(*document.Document)) {
 			return
 		}
 		for _, h := range res.Hits {
-			d := resFromHit(h, true, true)
+			d := i.resFromHit(h, true, true)
 			fn(d)
 		}
 		sortKey = res.Hits[n-1].Sort
 	}
 }
 
-func resFromHit(h *search.DocumentMatch, includeText, includeHTML bool) *document.Document {
+func (idx *indexer) resFromHit(h *search.DocumentMatch, includeText, includeHTML bool) *document.Document {
 	d := &document.Document{}
 	if t, ok := h.Fragments["title"]; ok {
 		d.Title = t[0]
@@ -1023,12 +1079,34 @@ func resFromHit(h *search.DocumentMatch, includeText, includeHTML bool) *documen
 	} else if t, ok := h.Fragments["text"]; ok {
 		d.Text = t[0]
 	}
+	if s, ok := h.Fields["html_key"].(string); ok {
+		d.HTMLKey = s
+	}
+	if s, ok := h.Fields["favicon_key"].(string); ok {
+		d.FaviconKey = s
+	}
 	if includeHTML {
-		if s, ok := h.Fields["html"].(string); ok {
+		if d.HTMLKey != "" {
+			data, err := readData(idx.dataDir, htmlSubdir, d.HTMLKey)
+			if err != nil {
+				log.Warn().Err(err).Str("key", d.HTMLKey).Msg("failed to load HTML from data store")
+			} else {
+				d.HTML = string(data)
+			}
+		} else if s, ok := h.Fields["html"].(string); ok {
+			// backward compat: old documents still have HTML inline in Bleve
 			d.HTML = s
 		}
 	}
-	if s, ok := h.Fields["favicon"].(string); ok {
+	if d.FaviconKey != "" {
+		data, err := readData(idx.dataDir, faviconSubdir, d.FaviconKey)
+		if err != nil {
+			log.Warn().Err(err).Str("key", d.FaviconKey).Msg("failed to load favicon from data store")
+		} else {
+			d.Favicon = string(data)
+		}
+	} else if s, ok := h.Fields["favicon"].(string); ok {
+		// backward compat: old documents still have favicon inline in Bleve
 		d.Favicon = s
 	}
 	if s, ok := h.Fields["domain"].(string); ok {
@@ -1171,7 +1249,9 @@ func createMapping(lang string) mapping.IndexMapping {
 	docMapping.AddFieldMappingsAt("domain", um)
 	docMapping.AddFieldMappingsAt("language", um)
 	docMapping.AddFieldMappingsAt("favicon", noIdxMap)
+	docMapping.AddFieldMappingsAt("favicon_key", noIdxMap)
 	docMapping.AddFieldMappingsAt("html", noIdxMap)
+	docMapping.AddFieldMappingsAt("html_key", noIdxMap)
 	docMapping.AddFieldMappingsAt("metadata", noIdxMap)
 	docMapping.AddFieldMappingsAt("added", bleve.NewNumericFieldMapping())
 	docMapping.AddFieldMappingsAt("type", bleve.NewNumericFieldMapping())
