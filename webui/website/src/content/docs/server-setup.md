@@ -93,84 +93,83 @@ In particular, some, like [Caddy] or [Traefik], have built-in support for automa
 
 ### Caddy
 
-   In your `Caddyfile`:
+In your `Caddyfile`:
 
-   ```
-   hister.example.com {
-       reverse_proxy localhost:4433
-   }
-   ```
+```
+hister.example.com {
+    reverse_proxy localhost:4433
+}
+```
 
-   Alternatively, if running Caddy solely for Hister:
+Alternatively, if running Caddy solely for Hister:
 
-   ```bash
-   caddy reverse-proxy --from hister.example.com --to localhost:4433
-   ```
+```bash
+caddy reverse-proxy --from hister.example.com --to localhost:4433
+```
 
 ### Nginx
 
-   ```nginx
-   # Make sure you have a good TLS configuration!
-   # https://ssl-config.mozilla.org/#server=nginx
+```nginx
+# Make sure you have a good TLS configuration!
+# https://ssl-config.mozilla.org/#server=nginx
 
-   # You will also need to point Nginx at your TLS certificate,
-   # https://nginx.org/en/docs/http/configuring_https_servers.html
-   # and likely also set up auto-renewal, assuming you're using Let's Encrypt.
-   # https://letsencrypt.org/docs/client-options/
+# You will also need to point Nginx at your TLS certificate,
+# https://nginx.org/en/docs/http/configuring_https_servers.html
+# and likely also set up auto-renewal, assuming you're using Let's Encrypt.
+# https://letsencrypt.org/docs/client-options/
 
-   server {
-   	server_name hister.example.com;
-   	listen 443 ssl; listen [::]:443 ssl;
-   	http2 on;
-   	listen 443 quic; listen [::]:443 quic;
-   	http3 on;
-   	add_header Alt-Svc 'h3=":443"; ma=86400; persist=1'; # Advertise HTTP/3 support.
+server {
+	server_name hister.example.com;
+	listen 443 ssl; listen [::]:443 ssl;
+	http2 on;
+	listen 443 quic; listen [::]:443 quic;
+	http3 on;
+	add_header Alt-Svc 'h3=":443"; ma=86400; persist=1'; # Advertise HTTP/3 support.
 
-   	gzip off; # Prevents some security vulns on encrypted traffic.
-   	# Redirect HTTP reqs made on the HTTPS port into proper HTTPS reqs.
-   	error_page 497 =301 https://$host:$server_port$request_uri;
+	gzip off; # Prevents some security vulns on encrypted traffic.
+	# Redirect HTTP reqs made on the HTTPS port into proper HTTPS reqs.
+	error_page 497 =301 https://$host:$server_port$request_uri;
 
-   	location / {
-   		proxy_pass http://127.0.0.1:4433$request_uri;
+	location / {
+		proxy_pass http://127.0.0.1:4433$request_uri;
 
-   		# More secure and performant than the default.
-   		proxy_http_version 1.1;
+		# More secure and performant than the default.
+		proxy_http_version 1.1;
 
-   		# Uncomment this if you know what you're doing.
-   		# add_header Access-Control-Allow-Origin *;
-   		proxy_set_header        Host              $host;
-   		proxy_set_header        X-Real-IP         $remote_addr;
-   		proxy_set_header        X-Forwarded-For   $proxy_add_x_forwarded_for;
-   		proxy_set_header        X-Forwarded-Proto $scheme;
-   		proxy_set_header        X-Scheme          $scheme;
+		# Uncomment this if you know what you're doing.
+		# add_header Access-Control-Allow-Origin *;
+		proxy_set_header        Host              $host;
+		proxy_set_header        X-Real-IP         $remote_addr;
+		proxy_set_header        X-Forwarded-For   $proxy_add_x_forwarded_for;
+		proxy_set_header        X-Forwarded-Proto $scheme;
+		proxy_set_header        X-Scheme          $scheme;
 
-   		# Configuration necessary for the /search endpoint.
-   		proxy_set_header   Upgrade    $http_upgrade;
-   		proxy_set_header   Connection $hister_connection; # This variable is defined in a `map` below.
-   		proxy_read_timeout 86400;
+		# Configuration necessary for the /search endpoint.
+		proxy_set_header   Upgrade    $http_upgrade;
+		proxy_set_header   Connection $hister_connection; # This variable is defined in a `map` below.
+		proxy_read_timeout 86400;
 
-   		# Some pages are larger than the default of 1 MiB, causing `413` errors.
-   		# 100 MiB should be reasonably large, adjust to taste.
-   		client_max_body_size 100m;
-   	}
-   }
-   # Optionally: add an extra `server` block to redirect HTTP to HTTPS.
-   server {
-   	server_name hister.example.com;
-   	listen 80;
-   	listen [::]:80;
-   	# Redirect HTTP to HTTPS.
-   	return 301 https://$host$request_uri;
-   }
-   # This is used to upgrade WebSocket connections on the `/search` endpoint.
-   map $uri $hister_connection {
-   	/search upgrade;
-   	default close;
-   }
-   ```
+		# Some pages are larger than the default of 1 MiB, causing `413` errors.
+		# 100 MiB should be reasonably large, adjust to taste.
+		client_max_body_size 100m;
+	}
+}
+# Optionally: add an extra `server` block to redirect HTTP to HTTPS.
+server {
+	server_name hister.example.com;
+	listen 80;
+	listen [::]:80;
+	# Redirect HTTP to HTTPS.
+	return 301 https://$host$request_uri;
+}
+# This is used to upgrade WebSocket connections on the `/search` endpoint.
+map $uri $hister_connection {
+	/search upgrade;
+	default close;
+}
+```
 
-   **Note**: if search doesn't work, there likely is a problem with WebSocket connections; troubleshooting info can be gathered from Nginx's `access.log` (tells you whether requests reached Nginx) and `error.log` (tells if you if any errors occurred _within_ Nginx).
-
+**Note**: if search doesn't work, there likely is a problem with WebSocket connections; troubleshooting info can be gathered from Nginx's `access.log` (tells you whether requests reached Nginx) and `error.log` (tells if you if any errors occurred _within_ Nginx).
 
 ## AppArmor Profile
 
