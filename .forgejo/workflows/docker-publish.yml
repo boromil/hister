@@ -6,8 +6,8 @@ on:
     tags: ['v*.*.*'] # Trigger on semantic version tags (e.g., v1.0.0)
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ forgejo.repository_owner }}/hister # Auto-uses your GitHub username/org
+  REGISTRY: codeberg.org
+  IMAGE_NAME: ${{ forgejo.repository }} # Auto-uses your GitHub username/org
 
 jobs:
   build-and-push:
@@ -18,10 +18,6 @@ jobs:
         include:
           - target: [release, root, debug]
             suffix: ['', '-root', '-debug']
-    permissions:
-      contents: read
-      packages: write # Required to push to GHCR
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v6
@@ -31,12 +27,12 @@ jobs:
         with:
           driver: docker-container # Required for multi-platform
 
-      - name: Log in to GHCR
+      - name: Log in to Codeberg
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ forgejo.repository_owner }}
-          password: ${{ secrets.FORGEJO_TOKEN }} # Auto-generated, no setup needed
+          password: ${{ secrets.REGISTRY_TOKEN }} # A personal access token
 
       - name: Extract Metadata (tags, labels)
         id: meta
