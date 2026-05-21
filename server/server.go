@@ -1615,6 +1615,19 @@ func serveReindex(c *webContext) {
 	serve200(c)
 }
 
+func serveCleanup(c *webContext) {
+	htmlRemoved, faviconRemoved, err := indexer.CleanupDataFiles(c.Config.FullPath(""))
+	if err != nil {
+		log.Error().Err(err).Msg("cleanup failed")
+		serve500(c)
+		return
+	}
+	c.JSON(map[string]int{
+		"htmlRemoved":    htmlRemoved,
+		"faviconRemoved": faviconRemoved,
+	})
+}
+
 func serveFavicon(c *webContext) {
 	i, err := iofs.ReadFile(appSubFS, "favicon.ico")
 	if err != nil {

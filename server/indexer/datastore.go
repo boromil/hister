@@ -90,12 +90,13 @@ func readData(dataDir, subdir, key string) ([]byte, error) {
 
 // cleanupDataSubdir removes any .gz files under {dataDir}/{subdir} whose hash
 // (filename without the .gz suffix) is not present in referenced.
-func cleanupDataSubdir(dataDir, subdir string, referenced map[string]struct{}) error {
+func cleanupDataSubdir(dataDir, subdir string, referenced map[string]struct{}) (int, error) {
 	root := filepath.Join(dataDir, subdir)
 	if _, err := os.Stat(root); os.IsNotExist(err) {
-		return nil
+		return 0, nil
 	}
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	removed := 0
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			log.Warn().Err(err).Str("path", path).Msg("error accessing data file during cleanup")
 			return nil
@@ -122,11 +123,13 @@ func cleanupDataSubdir(dataDir, subdir string, referenced map[string]struct{}) e
 			if rerr := os.Remove(path); rerr != nil {
 				log.Warn().Err(rerr).Str("path", path).Msg("failed to remove orphaned data file")
 			} else {
+				removed++
 				log.Debug().Str("key", key).Str("subdir", subdir).Msg("removed orphaned data file")
 			}
 		}
 		return nil
 	})
+	return removed, err
 }
 
 // splitPath splits a filepath into its individual components.
