@@ -6,6 +6,25 @@ title: 'Terminal Client'
 
 See also [the configuration documentation](configuration).
 
+## Global Flags
+
+These flags are available on every command:
+
+| Flag                       | Description                                                                                     |
+| -------------------------- | ----------------------------------------------------------------------------------------------- |
+| `--config PATH`            | Path to config file (default: `./config.yml`, `~/.histerrc`, or `~/.config/hister/config.yml`)  |
+| `--server-url URL` / `-u`  | Hister server URL (overrides `server.base_url` from config)                                     |
+| `--token TOKEN` / `-t`     | Access token for server authentication (overrides `app.access_token` from config)               |
+| `--log-level LEVEL` / `-l` | Log level: `error`, `warning`, `info`, `debug`, `trace` (default: `info`)                       |
+| `--search-url URL` / `-s`  | Default search engine URL with `{query}` placeholder                                            |
+| `--client-timeout N`       | HTTP client timeout in seconds for server communication (0 = no timeout; default if unset: 10s) |
+
+Example: index a slow extractor (e.g. `yt-dlp` with a longer timeout:
+
+```bash
+hister --client-timeout 20 index https://example.com
+```
+
 ## Command-Line Usage
 
 View all available commands:

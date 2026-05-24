@@ -18,6 +18,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"time"
 	_ "time/tzdata"
 
 	"github.com/asciimoo/hister/client"
@@ -1032,6 +1033,7 @@ func init() {
 	rootCmd.PersistentFlags().StringP("search-url", "s", dcfg.App.SearchURL, "set default search engine url")
 	rootCmd.PersistentFlags().StringP("server-url", "u", dcfg.Server.BaseURL, "hister server URL")
 	rootCmd.PersistentFlags().StringP("token", "t", "", "access token (overrides config access_token)")
+	rootCmd.PersistentFlags().Int("client-timeout", 0, "HTTP client timeout in seconds for server communication (0 = no timeout; default if unset: 10s)")
 
 	rootCmd.AddCommand(listenCmd)
 	rootCmd.AddCommand(createConfigCmd)
@@ -1866,6 +1868,10 @@ func newClient(extraOpts ...client.Option) *client.Client {
 	opts := []client.Option{client.WithUserAgent(UserAgent)}
 	if cfg.App.AccessToken != "" {
 		opts = append(opts, client.WithAccessToken(cfg.App.AccessToken))
+	}
+	if rootCmd.PersistentFlags().Changed("client-timeout") {
+		t, _ := rootCmd.PersistentFlags().GetInt("client-timeout")
+		opts = append(opts, client.WithTimeout(time.Duration(t)*time.Second))
 	}
 	opts = append(opts, extraOpts...)
 	return client.New(cfg.BaseURL(""), opts...)
