@@ -367,6 +367,15 @@ func init() {
 			},
 		},
 		{
+			Name:         "Cleanup",
+			Path:         "/api/cleanup",
+			Method:       POST,
+			CSRFRequired: true,
+			AdminOnly:    true,
+			Handler:      serveCleanup,
+			Description:  "Remove orphaned HTML and favicon data files no longer referenced by any document (admin only)",
+		},
+		{
 			Name:         "Reindex",
 			Path:         "/api/reindex",
 			Method:       POST,

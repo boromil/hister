@@ -99,3 +99,26 @@ func (c *Client) DeleteDocuments(query string) (err error) {
 	defer closeBody(resp, &err)
 	return checkStatus(resp)
 }
+
+// CleanupResult holds the number of orphaned files removed by the cleanup endpoint.
+type CleanupResult struct {
+	HTMLRemoved    int `json:"htmlRemoved"`
+	FaviconRemoved int `json:"faviconRemoved"`
+}
+
+func (c *Client) Cleanup() (result CleanupResult, err error) {
+	req, err := c.newRequest("POST", "/api/cleanup", nil)
+	if err != nil {
+		return result, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return result, err
+	}
+	defer closeBody(resp, &err)
+	if err = checkStatus(resp); err != nil {
+		return result, err
+	}
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	return result, err
+}

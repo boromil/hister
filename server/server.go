@@ -1515,6 +1515,7 @@ const (
 	batchOpGet  = "get"
 )
 
+// TODO handle data dir updates
 func serveBatch(c *webContext) {
 	c.Request.Body = http.MaxBytesReader(c.Response, c.Request.Body, 5<<20) // 5 MB
 	var req batchRequest
@@ -1613,6 +1614,19 @@ func serveReindex(c *webContext) {
 		return
 	}
 	serve200(c)
+}
+
+func serveCleanup(c *webContext) {
+	htmlRemoved, faviconRemoved, err := indexer.CleanupDataFiles(c.Config.FullPath(""))
+	if err != nil {
+		log.Error().Err(err).Msg("cleanup failed")
+		serve500(c)
+		return
+	}
+	c.JSON(map[string]int{
+		"htmlRemoved":    htmlRemoved,
+		"faviconRemoved": faviconRemoved,
+	})
 }
 
 func serveFavicon(c *webContext) {
