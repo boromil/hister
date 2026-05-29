@@ -91,4 +91,8 @@
   .prose {
     display: flow-root;
   }
+
+  .prose details summary {
+    cursor: pointer;
+  }
 }
