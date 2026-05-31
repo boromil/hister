@@ -6,7 +6,7 @@
   import { ScrollArea } from '@hister/components/ui/scroll-area';
   import { Button } from '@hister/components/ui/button';
   import * as DropdownMenu from '@hister/components/ui/dropdown-menu';
-  import { Eye, X, Maximize2, Minimize2, History, MoreVertical } from '@lucide/svelte';
+  import { Eye, X, Maximize2, Minimize2, History, MoreVertical, Video } from '@lucide/svelte';
 
   interface Props {
     url: string;
@@ -39,6 +39,14 @@
   let availableExtractors = $state<{ name: string; description: string }[]>([]);
   let extractorsLoaded = $state(false);
   let extractorsLoading = $state(false);
+
+  interface EmbeddedVideo {
+    url: string;
+    type: 'iframe' | 'video' | 'embed' | 'object';
+    mime?: string;
+  }
+
+  let showEmbeddedVideos = $state(false);
 
   function parseTemplateData(c: string): any | null {
     try {
@@ -97,6 +105,7 @@
     showVersions = false;
     versions = [];
     versionCount = 0;
+    showEmbeddedVideos = false;
     try {
       const extractorParam = extractor ? `&extractor=${encodeURIComponent(extractor)}` : '';
       const resp = await apiFetch(`/preview?url=${encodeURIComponent(u)}${extractorParam}`);
@@ -235,6 +244,18 @@
             {meta.description}
           </p>
         {/if}
+        {#if meta?.videos?.length}
+          <button
+            onclick={() => (showEmbeddedVideos = !showEmbeddedVideos)}
+            class="font-inter mt-1 inline-flex cursor-pointer items-center gap-1.5 text-xs {showEmbeddedVideos
+              ? 'text-hister-teal'
+              : 'text-text-brand-muted hover:text-text-brand'}"
+          >
+            <Video class="size-3.5 shrink-0" />
+            {showEmbeddedVideos ? 'Hide' : 'Show'} embedded
+            {(meta.videos as EmbeddedVideo[]).length === 1 ? 'video' : 'videos'}
+          </button>
+        {/if}
       </div>
       <div class="mt-1 flex shrink-0 items-center gap-1">
         <DropdownMenu.Root
@@ -345,6 +366,54 @@
         <div
           class="font-inter text-text-brand-secondary prose dark:prose-invert prose-a:text-hister-teal w-full max-w-[60em] p-4 text-sm"
         >
+          {#if meta?.videos?.length && showEmbeddedVideos}
+            <div class="not-prose mb-6 space-y-4">
+              {#each meta.videos as video (video.url)}
+                {@const v = video as EmbeddedVideo}
+                {#if v.type === 'iframe'}
+                  <div class="relative aspect-video w-full overflow-hidden">
+                    <iframe
+                      src={v.url}
+                      class="absolute inset-0 h-full w-full"
+                      title="Embedded video"
+                      allowfullscreen
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                      referrerpolicy="strict-origin-when-cross-origin"
+                    ></iframe>
+                  </div>
+                {:else if v.type === 'video'}
+                  <video controls class="w-full">
+                    {#if v.mime}
+                      <source src={v.url} type={v.mime} />
+                    {:else}
+                      <source src={v.url} />
+                    {/if}
+                  </video>
+                {:else if v.type === 'embed'}
+                  <div class="relative aspect-video w-full overflow-hidden">
+                    <embed
+                      src={v.url}
+                      type={v.mime || 'video/mp4'}
+                      class="absolute inset-0 h-full w-full"
+                    />
+                  </div>
+                {:else if v.type === 'object'}
+                  <div class="relative aspect-video w-full overflow-hidden">
+                    <object
+                      data={v.url}
+                      type={v.mime || 'video/mp4'}
+                      class="absolute inset-0 h-full w-full"
+                      title="Embedded video"
+                    >
+                      <p class="font-inter text-text-brand-muted p-2 text-xs">
+                        Video playback not supported.
+                      </p>
+                    </object>
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          {/if}
           {#if template === 'video' && templateData}
             <VideoPreview data={templateData} />
           {:else}

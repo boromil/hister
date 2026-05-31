@@ -253,6 +253,12 @@ func (d *Document) GetPreviewMeta() map[string]any {
 			meta["jsonld"] = nodes
 		}
 	}
+	if raw, ok := d.Metadata["videos"].(string); ok && raw != "" {
+		var vids []map[string]any
+		if err := json.Unmarshal([]byte(raw), &vids); err == nil && len(vids) > 0 {
+			meta["videos"] = vids
+		}
+	}
 	if len(meta) == 0 {
 		return nil
 	}
