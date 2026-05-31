@@ -233,7 +233,7 @@
       if (!tabs?.length) return;
       chrome.tabs.sendMessage(tabs[0].id!, { action: 'reindex' }, (r) => {
         if (r?.status === 'ok' && r.status_code === 201) {
-          setSuccessMessage('Reindex successful');
+          setSuccessMessage('Index successful');
           return;
         }
         let msg = 'Reindex failed';
@@ -371,7 +371,7 @@
           onclick={reindex}
           class="border-brutal-border font-outfit hover:border-hister-indigo h-9 w-full border-[3px] text-sm font-bold tracking-wide transition-all hover:shadow-[3px_3px_0_var(--brutal-shadow)]"
         >
-          'Index This Page'
+          Index this page now
         </Button>
       </div>
 
