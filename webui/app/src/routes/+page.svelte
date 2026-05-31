@@ -66,6 +66,8 @@
     Filter,
     Sparkles,
     SlidersHorizontal,
+    Copy,
+    Check,
   } from '@lucide/svelte';
   import type { HistoryItem } from '$lib/types';
 
@@ -151,6 +153,7 @@
   let showDeleteAllConfirm = $state(false);
   let deleteError: string | null = $state(null);
   let deleteErrorTimer: any = null;
+  let copiedUrl: string | null = $state(null);
 
   let recentSearches: string[] = $state([]);
   let rulesCount = $state(0);
@@ -1948,6 +1951,23 @@
                           class="font-fira text-hister-teal truncate overflow-hidden text-xs text-ellipsis whitespace-nowrap md:text-sm"
                           >{r.url}</span
                         >
+                        <button
+                          class="text-text-brand-muted hover:text-text-brand shrink-0 cursor-pointer"
+                          title="Copy URL"
+                          onclick={async () => {
+                            await navigator.clipboard.writeText(r.url);
+                            copiedUrl = r.url;
+                            setTimeout(() => {
+                              copiedUrl = null;
+                            }, 1500);
+                          }}
+                        >
+                          {#if copiedUrl === r.url}
+                            <Check class="size-3 text-hister-teal" />
+                          {:else}
+                            <Copy class="size-3" />
+                          {/if}
+                        </button>
                         {#if r.isPinned}
                           <Badge
                             variant="secondary"
