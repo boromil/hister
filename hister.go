@@ -1001,6 +1001,180 @@ var crawlDeleteCmd = &cobra.Command{
 	},
 }
 
+var exportCmd = &cobra.Command{
+	Use:   "export OUTPUT_FILE [QUERY...]",
+	Short: "Export indexed documents to a JSON file",
+	Long: `Export all indexed documents, or only those matching a search query, to a JSON file.
+
+Each document is written as a single JSON line. Lines not starting with '{' are
+structural markers ('[', ']', ',') and can be safely skipped by parsers.
+
+Use '-' as OUTPUT_FILE to write to stdout.`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		outputFile := args[0]
+		queryStr := strings.Join(args[1:], " ")
+		if queryStr == "" {
+			queryStr = "*"
+		}
+
+		var out *os.File
+		if outputFile == "-" {
+			out = os.Stdout
+		} else {
+			f, err := os.Create(outputFile)
+			if err != nil {
+				exit(1, "Failed to create output file: "+err.Error())
+			}
+			defer func() {
+				if err := f.Close(); err != nil {
+					log.Error().Err(err).Msg("Failed to close output file")
+				}
+			}()
+			out = f
+		}
+
+		bw := bufio.NewWriter(out)
+		defer func() {
+			if err := bw.Flush(); err != nil {
+				log.Error().Err(err).Msg("Failed to flush output")
+			}
+		}()
+
+		if _, err := fmt.Fprintln(bw, "["); err != nil {
+			exit(1, "Write error: "+err.Error())
+		}
+
+		c := newClient(client.WithTimeout(0))
+		first := true
+		count := 0
+		pageKey := ""
+		for {
+			res, err := c.Search(&indexer.Query{
+				Text:        queryStr,
+				PageKey:     pageKey,
+				IncludeHTML: true,
+				IncludeText: true,
+			})
+			if err != nil {
+				exit(1, "Search failed: "+err.Error())
+			}
+			for _, d := range res.Documents {
+				b, merr := json.Marshal(d)
+				if merr != nil {
+					log.Warn().Err(merr).Str("url", d.URL).Msg("Failed to serialize document, skipping")
+					continue
+				}
+				if !first {
+					if _, werr := fmt.Fprintln(bw, ","); werr != nil {
+						exit(1, "Write error: "+werr.Error())
+					}
+				}
+				first = false
+				if _, werr := bw.Write(b); werr != nil {
+					exit(1, "Write error: "+werr.Error())
+				}
+				if _, werr := fmt.Fprintln(bw); werr != nil {
+					exit(1, "Write error: "+werr.Error())
+				}
+				count++
+			}
+			if res.PageKey == "" || len(res.Documents) == 0 {
+				break
+			}
+			pageKey = res.PageKey
+		}
+
+		if _, err := fmt.Fprintln(bw, "]"); err != nil {
+			exit(1, "Write error: "+err.Error())
+		}
+
+		if outputFile != "-" {
+			fmt.Printf("%s Exported %d document(s) to %s\n",
+				cliSuccessStyle.Render("✓"), count, cliInfoStyle.Render(outputFile))
+		}
+	},
+}
+
+var importDataCmd = &cobra.Command{
+	Use:   "import INPUT_FILE",
+	Short: "Import documents from an export JSON file",
+	Long: `Import documents from a JSON file previously created by the export command.
+
+The file is read line by line; each line starting with '{' is parsed as a
+document and submitted to the running server. Content is re-processed
+server-side from the stored HTML.`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		inputFile := args[0]
+		skip, _ := cmd.Flags().GetBool("skip-existing")
+
+		f, err := os.Open(inputFile)
+		if err != nil {
+			exit(1, "Failed to open input file: "+err.Error())
+		}
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Error().Err(err).Msg("Failed to close input file")
+			}
+		}()
+
+		const maxLineSize = 16 * 1024 * 1024 // 16 MB covers large HTML+favicon lines
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 64*1024), maxLineSize)
+
+		c := newClient(client.WithTimeout(0))
+		imported := 0
+		skipped := 0
+		errCount := 0
+
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) == 0 || line[0] != '{' {
+				continue
+			}
+			var d document.Document
+			if err := json.Unmarshal(line, &d); err != nil {
+				log.Warn().Err(err).Msg("Failed to parse document line, skipping")
+				errCount++
+				continue
+			}
+			if skip {
+				exists, err := c.DocumentExists(d.URL)
+				if err != nil {
+					log.Warn().Err(err).Str("url", d.URL).Msg("Failed to check if document exists, skipping")
+					errCount++
+					continue
+				}
+				if exists {
+					log.Debug().Str("url", d.URL).Msg("Document already exists, skipping")
+					skipped++
+					continue
+				}
+			}
+			if err := c.AddDocumentJSON(&d); err != nil {
+				log.Warn().Err(err).Str("url", d.URL).Msg("Failed to add document")
+				errCount++
+				continue
+			}
+			imported++
+		}
+
+		if err := scanner.Err(); err != nil {
+			exit(1, "Failed to read input file: "+err.Error())
+		}
+
+		msg := fmt.Sprintf("%s Imported %d document(s)", cliSuccessStyle.Render("✓"), imported)
+		if skipped > 0 {
+			msg += fmt.Sprintf(" (%d skipped)", skipped)
+		}
+		if errCount > 0 {
+			msg += fmt.Sprintf(" (%d errors)", errCount)
+		}
+		fmt.Println(msg)
+	},
+}
+
 var reindexCmd = &cobra.Command{
 	Use:   "reindex",
 	Short: "Reindex",
@@ -1069,6 +1243,8 @@ func init() {
 	rootCmd.AddCommand(listFilesCmd)
 	rootCmd.AddCommand(indexCmd)
 	rootCmd.AddCommand(importCmd)
+	rootCmd.AddCommand(exportCmd)
+	rootCmd.AddCommand(importDataCmd)
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(reindexCmd)
 	rootCmd.AddCommand(cleanupCmd)
@@ -1103,6 +1279,8 @@ func init() {
 	deleteUserCmd.Flags().Bool("purge", false, "also delete all indexed documents belonging to the user")
 
 	showUserCmd.Flags().Bool("token", false, "display the user's access token")
+
+	importDataCmd.Flags().Bool("skip-existing", false, "Do not overwrite documents that are already in the index")
 
 	reindexCmd.Flags().BoolP("exclude-sensitive", "x", false, "don't add documents that contain sensitive content matched by config.SensitiveContentPatterns")
 
