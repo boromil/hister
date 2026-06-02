@@ -11,6 +11,7 @@
     { href: '/', label: 'HOME' },
     { href: '/docs', label: 'DOCS' },
     { href: '/posts', label: 'POSTS' },
+    { href: '/datasets', label: 'DATASETS' },
   ];
 
   function isActive(href: string): boolean {
