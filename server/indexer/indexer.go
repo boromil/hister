@@ -399,7 +399,7 @@ func Reindex(basePath string, rules *config.Rules, skipSensitiveChecks bool, det
 	total := idx.Total()
 	batchSize := 50
 	processed := 0
-	for subIdxName, subIdx := range idx.indexers {
+	for subIdxName, subIdx := range idx.indexers.All {
 		log.Info().Str("sub-index", subIdxName).Msg("Reindexing sub-index")
 		var sortKey []string
 		req := bleve.NewSearchRequest(q)
