@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/gob"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	iofs "io/fs"
@@ -699,19 +700,13 @@ func serveConfig(c *webContext) {
 	})
 }
 
-func serveSearch(c *webContext) {
-	origin := c.Request.Header.Get("Origin")
-	if !c.Config.IsSameHost(origin) {
-		serve500(c)
-		log.Info().Str("Origin", origin).Msg("Invalid origin")
-		return
-	}
-	urlParams := c.Request.URL.Query()
+// parseSearchQueryParams parses URL query parameters into an indexer.Query.
+func parseSearchQueryParams(r *http.Request) (*indexer.Query, error) {
+	urlParams := r.URL.Query()
 	query := &indexer.Query{}
 	if rawQuery := urlParams.Get("query"); rawQuery != "" {
 		if err := json.Unmarshal([]byte(rawQuery), query); err != nil {
-			c.Response.WriteHeader(http.StatusBadRequest)
-			return
+			return nil, err
 		}
 	}
 	if q := urlParams.Get("q"); q != "" {
@@ -729,42 +724,47 @@ func serveSearch(c *webContext) {
 			}
 		}
 	}
-	if query.Text != "" {
-		if urlParams.Get("include_html") == "1" {
-			query.IncludeHTML = true
+	if urlParams.Get("include_html") == "1" {
+		query.IncludeHTML = true
+	}
+	if pk := urlParams.Get("page_key"); pk != "" {
+		query.PageKey = pk
+	}
+	if s := urlParams.Get("sort"); s != "" {
+		query.Sort = s
+	}
+	if v := urlParams.Get("semantic"); v != "" {
+		query.SemanticEnabled = v == "1" || v == "true"
+	}
+	if v := urlParams.Get("semantic_threshold"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			query.SemanticThreshold = f
 		}
-		if pk := c.Request.URL.Query().Get("page_key"); pk != "" {
-			query.PageKey = pk
-		}
-		if s := c.Request.URL.Query().Get("sort"); s != "" {
-			query.Sort = s
-		}
+	}
+	return query, nil
+}
 
-		if v := c.Request.URL.Query().Get("semantic"); v != "" {
-			query.SemanticEnabled = v == "1" || v == "true"
-		}
-		if v := c.Request.URL.Query().Get("semantic_threshold"); v != "" {
-			if f, err := strconv.ParseFloat(v, 64); err == nil {
-				query.SemanticThreshold = f
-			}
-		}
-		r, err := doSearch(query, c.Config, c.effectiveRules(), c.UserID)
-		if err != nil {
-			fmt.Println(err)
-			serve500(c)
-			return
-		}
-		jr, err := json.Marshal(r)
-		if err != nil {
-			serve500(c)
-			return
-		}
-		c.Response.Header().Add("Content-Type", "application/json")
-		if _, err := c.Response.Write(jr); err != nil {
-			log.Warn().Err(err).Msg("failed to write search response")
-		}
+// serveSearchHTTP executes a single search and writes a JSON response.
+func serveSearchHTTP(c *webContext, query *indexer.Query) {
+	r, err := doSearch(query, c.Config, c.effectiveRules(), c.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("search error")
+		serve500(c)
 		return
 	}
+	jr, err := json.Marshal(r)
+	if err != nil {
+		serve500(c)
+		return
+	}
+	c.Response.Header().Add("Content-Type", "application/json")
+	if _, err := c.Response.Write(jr); err != nil {
+		log.Warn().Err(err).Msg("failed to write search response")
+	}
+}
+
+// serveSearchWebSocket upgrades the connection and serves searches over WebSocket.
+func serveSearchWebSocket(c *webContext) {
 	conn, err := ws.Upgrade(c.Response, c.Request, nil)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to upgrade websocket request")
@@ -776,7 +776,7 @@ func serveSearch(c *webContext) {
 		}
 	}()
 	for {
-		_, q, err := conn.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Error().Err(err).Msg("failed to read websocket message")
@@ -784,8 +784,7 @@ func serveSearch(c *webContext) {
 			break
 		}
 		var query *indexer.Query
-		err = json.Unmarshal(q, &query)
-		if err != nil {
+		if err = json.Unmarshal(msg, &query); err != nil {
 			log.Error().Err(err).Msg("failed to parse query")
 			continue
 		}
@@ -802,12 +801,43 @@ func serveSearch(c *webContext) {
 		jr, err := json.Marshal(res)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to marshal indexer results")
+			continue
 		}
 		if err := conn.WriteMessage(websocket.TextMessage, jr); err != nil {
 			log.Error().Err(err).Msg("failed to write websocket message")
 			break
 		}
 	}
+}
+
+func serveSearch(c *webContext) {
+	origin := c.Request.Header.Get("Origin")
+	// `?format=json` (or `Accept: application/json`) opts the caller into a
+	// pure JSON response and skips the same-host Origin check, so CLI tools
+	// and ad-hoc HTTP clients can hit the search endpoint without spoofing
+	// a hister:// Origin header.
+	jsonFormat := c.Request.URL.Query().Get("format") == "json" ||
+		c.Request.Header.Get("Accept") == "application/json"
+	if !jsonFormat && !c.Config.IsSameHost(origin) {
+		serve500(c)
+		log.Info().Str("Origin", origin).Msg("Invalid origin")
+		return
+	}
+	query, err := parseSearchQueryParams(c.Request)
+	if err != nil {
+		c.Response.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if jsonFormat && query.Text == "" {
+		c.Response.WriteHeader(http.StatusBadRequest)
+		_, _ = c.Response.Write([]byte(`{"error":"text query required for format=json"}`))
+		return
+	}
+	if query.Text != "" {
+		serveSearchHTTP(c, query)
+		return
+	}
+	serveSearchWebSocket(c)
 }
 
 func doSearch(query *indexer.Query, cfg *config.Config, rules *config.Rules, userID uint) (*indexer.Results, error) {
@@ -1052,6 +1082,7 @@ func serveUpdateLabel(c *webContext) {
 }
 
 func serveHistory(c *webContext) {
+	rssFormat := c.Request.URL.Query().Get("format") == "rss"
 	if c.Request.URL.Query().Get("opened") == "true" {
 		var lastID uint
 		if v := c.Request.URL.Query().Get("last_id"); v != "" {
@@ -1089,11 +1120,93 @@ func serveHistory(c *webContext) {
 		if len(docs) > 0 {
 			nextLastID = docs[len(docs)-1].ID
 		}
+		if rssFormat {
+			rssItems := make([]rssItem, 0, len(docs))
+			for _, d := range docs {
+				title := d.Title
+				if title == "" {
+					title = d.URL
+				}
+				rssItems = append(rssItems, rssItem{
+					Title:   title,
+					Link:    d.URL,
+					GUID:    rssGUID{Value: d.URL, IsPermaLink: "true"},
+					PubDate: time.Unix(d.Added, 0).UTC().Format(time.RFC1123Z),
+				})
+			}
+			serveRSS(c, "Hister - visited pages", c.Config.BaseURL("/"), rssItems)
+			return
+		}
 		c.JSON(&openedResponse{Documents: docs, LastID: nextLastID})
 		return
 	}
 	ds := indexer.GetLatestDocuments(100, c.Request.URL.Query().Get("last"), c.UserID)
+	if rssFormat {
+		var rssItems []rssItem
+		if ds != nil {
+			rssItems = make([]rssItem, 0, len(ds.Documents))
+			for _, d := range ds.Documents {
+				title := d.Title
+				if title == "" {
+					title = d.URL
+				}
+				rssItems = append(rssItems, rssItem{
+					Title:   title,
+					Link:    d.URL,
+					GUID:    rssGUID{Value: d.URL, IsPermaLink: "true"},
+					PubDate: time.Unix(d.Added, 0).UTC().Format(time.RFC1123Z),
+				})
+			}
+		}
+		serveRSS(c, "Hister - indexed pages", c.Config.BaseURL("/"), rssItems)
+		return
+	}
 	c.JSON(ds)
+}
+
+type rssGUID struct {
+	Value       string `xml:",chardata"`
+	IsPermaLink string `xml:"isPermaLink,attr,omitempty"`
+}
+
+type rssItem struct {
+	Title   string  `xml:"title"`
+	Link    string  `xml:"link"`
+	GUID    rssGUID `xml:"guid"`
+	PubDate string  `xml:"pubDate,omitempty"`
+}
+
+type rssChannel struct {
+	Title       string    `xml:"title"`
+	Link        string    `xml:"link"`
+	Description string    `xml:"description"`
+	Items       []rssItem `xml:"item"`
+}
+
+type rssFeed struct {
+	XMLName xml.Name   `xml:"rss"`
+	Version string     `xml:"version,attr"`
+	Channel rssChannel `xml:"channel"`
+}
+
+func serveRSS(c *webContext, title, link string, items []rssItem) {
+	feed := rssFeed{
+		Version: "2.0",
+		Channel: rssChannel{
+			Title:       title,
+			Link:        link,
+			Description: title,
+			Items:       items,
+		},
+	}
+	c.Response.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
+	if _, err := c.Response.Write([]byte(xml.Header)); err != nil {
+		log.Warn().Err(err).Msg("failed to write RSS header")
+		return
+	}
+	if err := xml.NewEncoder(c.Response).Encode(feed); err != nil {
+		log.Warn().Err(err).Msg("failed to encode RSS feed")
+	}
 }
 
 func serveSaveHistory(c *webContext) {
@@ -1208,6 +1321,36 @@ func serveRules(c *webContext) {
 	serve200(c)
 }
 
+func serveGetFacets(c *webContext) {
+	params := c.Request.URL.Query()
+	q := &indexer.Query{
+		Text:       params.Get("q"),
+		Facets:     true,
+		FacetsOnly: true,
+		FacetSizes: make(map[string]int),
+	}
+	for param, field := range map[string]*int64{"date_from": &q.DateFrom, "date_to": &q.DateTo} {
+		if v := params.Get(param); v != "" {
+			if t, err := strconv.ParseInt(v, 10, 64); err == nil {
+				*field = t
+			}
+		}
+	}
+	for key, vals := range params {
+		if name, ok := strings.CutPrefix(key, "size_"); ok && len(vals) > 0 {
+			if n, err := strconv.Atoi(vals[0]); err == nil && n > 0 {
+				q.FacetSizes[name] = n
+			}
+		}
+	}
+	res, err := doSearch(q, c.Config, c.effectiveRules(), c.UserID)
+	if err != nil || res.Facets == nil {
+		c.JSON(map[string]any{})
+		return
+	}
+	c.JSON(res.Facets)
+}
+
 func serveGet(c *webContext) {
 	u := c.Request.URL.Query().Get("url")
 	doc := indexer.GetByURLAndUser(u, c.UserID)
@@ -1226,6 +1369,7 @@ func serveGet(c *webContext) {
 func servePreview(c *webContext) {
 	// TODO apply previous version diffs to display earlier versions of the page.
 	u := c.Request.URL.Query().Get("url")
+	extractorName := c.Request.URL.Query().Get("extractor")
 	doc := indexer.GetByURLAndUser(u, c.UserID)
 	if doc == nil {
 		serve500(c)
@@ -1236,8 +1380,12 @@ func servePreview(c *webContext) {
 	if doc.HTML == "" {
 		resp = types.PreviewResponse{Content: doc.Text}
 	} else {
-		resp, err = extractor.Preview(doc)
+		resp, err = extractor.Preview(doc, extractorName)
 		if err != nil {
+			if errors.Is(err, extractor.ErrNoExtractor) {
+				http.Error(c.Response, err.Error(), http.StatusBadRequest)
+				return
+			}
 			log.Warn().Err(err).Str("url", u).Msg("failed to generate preview")
 			serve500(c)
 			return
@@ -1358,6 +1506,16 @@ func serveStats(c *webContext) {
 }
 
 func serveExtractors(c *webContext) {
+	u := c.Request.URL.Query().Get("url")
+	if u != "" {
+		doc := indexer.GetByURLAndUser(u, c.UserID)
+		if doc == nil {
+			serve500(c)
+			return
+		}
+		c.JSON(extractor.ListMatching(doc))
+		return
+	}
 	infos := extractor.List()
 	if !c.Config.App.DisplayExtractorConfig {
 		for i := range infos {

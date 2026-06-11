@@ -39,6 +39,26 @@ export interface SemanticHit {
   document?: SearchResult;
 }
 
+export interface TermCount {
+  term: string;
+  count: number;
+}
+
+export interface RangeCount {
+  name: string;
+  count: number;
+}
+
+export interface TermFacet {
+  terms?: TermCount[];
+  other?: number;
+}
+
+export interface FacetsResult {
+  terms?: Record<string, TermFacet>;
+  date_histogram?: RangeCount[];
+}
+
 export interface SearchResults {
   documents?: SearchResult[];
   history?: SearchResult[];
@@ -49,6 +69,7 @@ export interface SearchResults {
   semantic_hits?: SemanticHit[];
   semantic_enabled?: boolean;
   page_key?: string;
+  facets?: FacetsResult;
 }
 
 export function escapeHTML(s: string): string {
@@ -358,6 +379,7 @@ export interface SearchQueryOptions {
   semantic?: { enabled: boolean; threshold: number };
   pageKey?: string;
   limit?: number;
+  facets?: boolean;
 }
 
 interface QueryParams {
@@ -370,10 +392,11 @@ interface QueryParams {
   semantic_threshold?: number;
   limit?: number;
   page_key?: string;
+  facets?: boolean;
 }
 
 export function buildSearchQuery(text: string, opts: SearchQueryOptions = {}): QueryParams {
-  const { sort, dateFrom, dateTo, semantic, pageKey, limit } = opts;
+  const { sort, dateFrom, dateTo, semantic, pageKey, limit, facets } = opts;
   return {
     text,
     highlight: 'HTML',
@@ -385,6 +408,7 @@ export function buildSearchQuery(text: string, opts: SearchQueryOptions = {}): Q
     ...(semantic && { semantic_enabled: semantic.enabled, semantic_threshold: semantic.threshold }),
     ...(limit && { limit }),
     ...(pageKey && { page_key: pageKey }),
+    ...(facets && { facets: true }),
   };
 }
 

@@ -15,8 +15,9 @@
       title: 'Resources',
       links: [
         { label: 'GitHub', href: 'https://github.com/asciimoo/hister' },
-        { label: 'Codeberg', href: 'https://codeberg.com/asciimoo/hister' },
+        { label: 'Codeberg', href: 'https://codeberg.org/asciimoo/hister' },
         { label: 'Posts', href: '/posts' },
+        { label: 'Datasets', href: '/datasets' },
       ],
     },
     {

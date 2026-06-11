@@ -51,6 +51,7 @@ type App struct {
 	AccessToken            string `yaml:"access_token" mapstructure:"access_token"`
 	UserHandling           bool   `yaml:"user_handling" mapstructure:"user_handling"`
 	LogLevel               string `yaml:"log_level" mapstructure:"log_level"`
+	LogFile                string `yaml:"log_file" mapstructure:"log_file"`
 	DebugSQL               bool   `yaml:"debug_sql" mapstructure:"debug_sql"`
 	OpenResultsOnNewTab    bool   `yaml:"open_results_on_new_tab" mapstructure:"open_results_on_new_tab"`
 	RedirectOnNoResults    bool   `yaml:"redirect_on_no_results" mapstructure:"redirect_on_no_results"`
@@ -64,6 +65,11 @@ type TUI struct {
 	ColorScheme string `yaml:"color_scheme" mapstructure:"color_scheme"`
 	ThemesDir   string `yaml:"themes_dir" mapstructure:"themes_dir"`
 }
+
+var (
+	DefaultServerAddress = "127.0.0.1:4433"
+	DefaultServerBaseURL = ""
+)
 
 type Server struct {
 	Address   string                 `yaml:"address"     mapstructure:"address"`
@@ -441,7 +447,8 @@ func CreateDefaultConfig() *Config {
 			DisplayExtractorConfig: false,
 		},
 		Server: Server{
-			Address:  "127.0.0.1:4433",
+			Address:  DefaultServerAddress,
+			BaseURL:  DefaultServerBaseURL,
 			Database: "db.sqlite3",
 		},
 		Indexer: Indexer{

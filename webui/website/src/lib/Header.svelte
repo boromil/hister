@@ -8,7 +8,7 @@
   let menuOpen = $state(false);
 
   const links = [
-    { href: '/', label: 'HOME' },
+    { href: '/datasets', label: 'DATASETS' },
     { href: '/docs', label: 'DOCS' },
     { href: '/posts', label: 'POSTS' },
   ];

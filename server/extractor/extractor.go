@@ -17,6 +17,7 @@ import (
 
 	"github.com/asciimoo/hister/config"
 	"github.com/asciimoo/hister/server/document"
+	"github.com/asciimoo/hister/server/extractor/extractors/embeddedvideo"
 	"github.com/asciimoo/hister/server/extractor/extractors/github"
 	"github.com/asciimoo/hister/server/extractor/extractors/godoc"
 	"github.com/asciimoo/hister/server/extractor/extractors/jsonld"
@@ -66,12 +67,52 @@ type Extractor interface {
 // ErrNoExtractor is returned when no extractor can handle the document.
 var ErrNoExtractor = errors.New("no extractor found")
 
+// ErrExtractorAbort is returned when an extractor signals ExtractorAbort.
+var ErrExtractorAbort = errors.New("extractor aborted")
+
 // ExtractorInfo holds a summary of an extractor's identity and current state.
 type ExtractorInfo struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	Enabled     bool           `json:"enabled"`
 	Options     map[string]any `json:"options,omitempty"`
+}
+
+// ListMatching returns an ExtractorInfo entry for every enabled extractor that
+// matches d, in chain order. Options is omitted so the result is safe to send
+// to clients.
+func ListMatching(d *document.Document) []ExtractorInfo {
+	infos := make([]ExtractorInfo, 0)
+	for _, e := range extractors {
+		if !e.GetConfig().Enable {
+			continue
+		}
+		if e.Match(d) {
+			infos = append(infos, ExtractorInfo{
+				Name:        e.Name(),
+				Description: e.Description(),
+				Enabled:     true,
+			})
+		}
+	}
+	return infos
+}
+
+// ListEnabled returns an ExtractorInfo entry for every enabled extractor in
+// chain order. Options is omitted so the result is safe to send to clients.
+func ListEnabled() []ExtractorInfo {
+	infos := make([]ExtractorInfo, 0, len(extractors))
+	for _, e := range extractors {
+		if !e.GetConfig().Enable {
+			continue
+		}
+		infos = append(infos, ExtractorInfo{
+			Name:        e.Name(),
+			Description: e.Description(),
+			Enabled:     true,
+		})
+	}
+	return infos
 }
 
 // List returns an ExtractorInfo entry for every registered extractor in chain
@@ -92,6 +133,7 @@ func List() []ExtractorInfo {
 }
 
 var extractors = []Extractor{
+	&embeddedvideo.EmbeddedVideoExtractor{},
 	&jsonld.JSONLDExtractor{},
 	&stackoverflow.StackoverflowExtractor{},
 	&godoc.GoDocExtractor{},
@@ -102,7 +144,7 @@ var extractors = []Extractor{
 	&notion.NotionExtractor{},
 	&ytdlp.YtdlpExtractor{},
 	&readabilityExtractor{},
-	&defaultExtractor{},
+	&basicExtractor{},
 }
 
 // Init applies user-supplied extractor configurations on top of each
@@ -141,7 +183,7 @@ func Extract(d *document.Document) error {
 			case types.ExtractorStop:
 				return nil
 			case types.ExtractorAbort:
-				return fmt.Errorf("extractor %s: %w", e.Name(), err)
+				return fmt.Errorf("extractor %s: %w: %w", e.Name(), ErrExtractorAbort, err)
 			default:
 				if err != nil {
 					log.Warn().Err(err).Str("URL", d.URL).Str("Extractor", e.Name()).Msg("Failed to extract content")
@@ -152,9 +194,26 @@ func Extract(d *document.Document) error {
 	return ErrNoExtractor
 }
 
-// Preview returns a rendered preview of the document using the first matching
-// extractor. Returns ErrNoExtractor if none match.
-func Preview(d *document.Document) (types.PreviewResponse, error) {
+// Preview returns a rendered preview of the document. When name is empty the
+// first matching enabled extractor in the chain is used. When name is
+// non-empty the extractor with that name (case-insensitive) is used directly,
+// bypassing Match() and the enabled check. ErrNoExtractor is returned when
+// name is non-empty but not found.
+func Preview(d *document.Document, name string) (types.PreviewResponse, error) {
+	if name != "" {
+		lower := strings.ToLower(name)
+		for _, e := range extractors {
+			if strings.ToLower(e.Name()) == lower {
+				log.Debug().Str("URL", d.URL).Str("Extractor", e.Name()).Msg("Creating preview with explicit extractor")
+				resp, state, err := e.Preview(d)
+				if state == types.ExtractorAbort {
+					return types.PreviewResponse{}, fmt.Errorf("extractor %s: %w", e.Name(), err)
+				}
+				return resp, nil
+			}
+		}
+		return types.PreviewResponse{}, fmt.Errorf("%w: %s", ErrNoExtractor, name)
+	}
 	for _, e := range extractors {
 		if !e.GetConfig().Enable {
 			continue
@@ -177,7 +236,7 @@ func Preview(d *document.Document) (types.PreviewResponse, error) {
 	return types.PreviewResponse{}, ErrNoExtractor
 }
 
-type defaultExtractor struct {
+type basicExtractor struct {
 	cfg *config.Extractor
 }
 
@@ -185,14 +244,14 @@ type readabilityExtractor struct {
 	cfg *config.Extractor
 }
 
-func (e *defaultExtractor) GetConfig() *config.Extractor {
+func (e *basicExtractor) GetConfig() *config.Extractor {
 	if e.cfg == nil {
 		return &config.Extractor{Enable: true, Options: map[string]any{}}
 	}
 	return e.cfg
 }
 
-func (e *defaultExtractor) SetConfig(c *config.Extractor) error {
+func (e *basicExtractor) SetConfig(c *config.Extractor) error {
 	for k := range c.Options {
 		return fmt.Errorf("unknown option %q", k)
 	}
@@ -215,21 +274,21 @@ func (e *readabilityExtractor) SetConfig(c *config.Extractor) error {
 	return nil
 }
 
-func (e *defaultExtractor) Name() string {
-	return "Default"
+func (e *basicExtractor) Name() string {
+	return "Basic"
 }
 
-func (e *defaultExtractor) Description() string {
+func (e *basicExtractor) Description() string {
 	return "Fallback extractor that strips HTML tags and extracts plain text from any web page."
 }
 
-func (e *defaultExtractor) Match(_ *document.Document) bool {
+func (e *basicExtractor) Match(_ *document.Document) bool {
 	return true
 }
 
-func (e *defaultExtractor) Extract(d *document.Document) (types.ExtractorState, error) {
+func (e *basicExtractor) Extract(d *document.Document) (types.ExtractorState, error) {
 	d.Title = ""
-	r := bytes.NewReader([]byte(d.HTML))
+	r := strings.NewReader(d.HTML)
 	doc := html.NewTokenizer(r)
 	inBody := false
 	skip := false
@@ -278,7 +337,7 @@ out:
 	return types.ExtractorStop, nil
 }
 
-func (e *defaultExtractor) Preview(d *document.Document) (types.PreviewResponse, types.ExtractorState, error) {
+func (e *basicExtractor) Preview(d *document.Document) (types.PreviewResponse, types.ExtractorState, error) {
 	return types.PreviewResponse{Content: d.Text}, types.ExtractorStop, nil
 }
 
@@ -295,7 +354,7 @@ func (e *readabilityExtractor) Match(_ *document.Document) bool {
 }
 
 func (e *readabilityExtractor) Extract(d *document.Document) (types.ExtractorState, error) {
-	r := bytes.NewReader([]byte(d.HTML))
+	r := strings.NewReader(d.HTML)
 
 	u, err := url.Parse(d.URL)
 	if err != nil {
@@ -344,7 +403,7 @@ func writeReadabilityMeta(d *document.Document, a readability.Article) {
 }
 
 func (e *readabilityExtractor) Preview(d *document.Document) (types.PreviewResponse, types.ExtractorState, error) {
-	r := bytes.NewReader([]byte(d.HTML))
+	r := strings.NewReader(d.HTML)
 	u, err := url.Parse(d.URL)
 	if err != nil {
 		return types.PreviewResponse{}, types.ExtractorStop, err

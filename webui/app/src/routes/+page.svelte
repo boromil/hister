@@ -26,7 +26,13 @@
   import { fetchConfig, apiFetch, getUserId } from '$lib/api';
   import { ResultState } from '$lib/result-state.svelte';
   import { showHelp } from '$lib/stores';
-  import type { SearchResults, SemanticHit, SearchResult, SearchQueryOptions } from '$lib/search';
+  import type {
+    SearchResults,
+    SemanticHit,
+    SearchResult,
+    SearchQueryOptions,
+    FacetsResult,
+  } from '$lib/search';
   import { RESULTS_PER_PAGE } from '$lib/search';
   import { animate } from 'animejs';
   import { Input } from '@hister/components/ui/input';
@@ -59,6 +65,9 @@
     Calendar,
     Filter,
     Sparkles,
+    SlidersHorizontal,
+    Copy,
+    Check,
   } from '@lucide/svelte';
   import type { HistoryItem } from '$lib/types';
 
@@ -70,6 +79,21 @@
     semanticEnabled: boolean;
     similarityThreshold: number;
     semanticWeight: number;
+  }
+
+  interface DisplayResult {
+    url: string;
+    title: string;
+    domain: string;
+    score?: number;
+    text?: string;
+    favicon?: string;
+    added?: number;
+    label?: string;
+    semanticScore?: number;
+    finalScore?: number;
+    sourceType?: 'keyword' | 'semantic' | 'both';
+    isPinned: boolean;
   }
 
   let config: Config = $state({
@@ -144,6 +168,7 @@
   let showDeleteAllConfirm = $state(false);
   let deleteError: string | null = $state(null);
   let deleteErrorTimer: any = null;
+  let copiedUrl: string | null = $state(null);
 
   let recentSearches: string[] = $state([]);
   let rulesCount = $state(0);
@@ -156,7 +181,6 @@
 
   let heroTitleEl: HTMLElement | undefined = $state();
   let searchBoxEl: HTMLElement | undefined = $state();
-  let hintEl: HTMLElement | undefined = $state();
   let chipsContainerEl: HTMLElement | undefined = $state();
   let statsRowEl: HTMLElement | undefined = $state();
   let kbdEl: HTMLElement | null = $state(null);
@@ -292,21 +316,6 @@
     tipWasSearching = isSearching;
   });
 
-  interface DisplayResult {
-    url: string;
-    title: string;
-    domain: string;
-    score?: number;
-    text?: string;
-    favicon?: string;
-    added?: number;
-    label?: string;
-    semanticScore?: number;
-    finalScore?: number;
-    sourceType?: 'keyword' | 'semantic' | 'both';
-    isPinned: boolean;
-  }
-
   interface MergedResult {
     url: string;
     title: string;
@@ -397,6 +406,161 @@
     ...(lastResults?.history ?? []).map((r): DisplayResult => ({ ...r, isPinned: true })),
     ...mergedResults.map((r): DisplayResult => ({ ...r, isPinned: false })),
   ]);
+
+  // Faceted navigation — lazy fetch on dropdown open
+  const bucketLabels: Record<string, string> = {
+    last_24h: 'Last 24 hours',
+    last_7d: 'Last 7 days',
+    last_30d: 'Last 30 days',
+    last_year: 'Last year',
+    older: 'Older',
+  };
+
+  // facetsCache maps a query+date key to the fetched FacetsResult
+  let facetsCache = $state(new Map<string, FacetsResult>());
+  let facetsLoading = $state(false);
+  let filtersDropdownOpen = $state(false);
+  let actionsDropdownOpen = $state(false);
+  // Maps facet name (e.g. "domains", "languages") to the requested top-N size.
+  let facetSizes = $state(new Map<string, number>());
+
+  const DEFAULT_FACET_SIZE = 10;
+
+  function facetSize(name: string): number {
+    return facetSizes.get(name) ?? DEFAULT_FACET_SIZE;
+  }
+
+  function facetsCacheKey(): string {
+    const sizes = [...facetSizes.entries()].sort(([a], [b]) => a.localeCompare(b));
+    return `${query}|${dateFrom}|${dateTo}|${JSON.stringify(sizes)}`;
+  }
+
+  const currentFacets = $derived(facetsCache.get(facetsCacheKey()));
+
+  async function fetchFacets() {
+    if (!query || facetsLoading) return;
+    const key = facetsCacheKey();
+    if (facetsCache.has(key)) return;
+    facetsLoading = true;
+    try {
+      const params = new URLSearchParams({ q: query });
+      if (dateFrom) {
+        params.set('date_from', String(Math.floor(new Date(dateFrom).getTime() / 1000)));
+      }
+      if (dateTo) {
+        params.set('date_to', String(Math.floor(new Date(dateTo).getTime() / 1000)));
+      }
+      for (const [name, size] of facetSizes) {
+        if (size !== DEFAULT_FACET_SIZE) params.set(`size_${name}`, String(size));
+      }
+      const res = await fetch(`api/facets?${params}`);
+      if (res.ok) {
+        const data: FacetsResult = await res.json();
+        facetsCache = new Map(facetsCache).set(key, data);
+      }
+    } finally {
+      facetsLoading = false;
+    }
+  }
+
+  function loadMoreFacet(name: string) {
+    facetSizes = new Map(facetSizes).set(name, facetSize(name) + DEFAULT_FACET_SIZE);
+    fetchFacets();
+  }
+
+  $effect(() => {
+    if (filtersDropdownOpen) fetchFacets();
+  });
+
+  // Invalidate cache and reset sizes when query or dates change
+  $effect(() => {
+    const _q = query;
+    const _df = dateFrom;
+    const _dt = dateTo;
+    facetsCache = new Map();
+    facetSizes = new Map();
+  });
+
+  function dateRangeForBucket(name: string): { from: string; to: string } {
+    const now = new Date();
+    const toISO = (d: Date) => d.toISOString().slice(0, 10);
+    const ago = (days: number) => toISO(new Date(now.getTime() - days * 86400 * 1000));
+    switch (name) {
+      case 'last_24h':
+        return { from: ago(1), to: '' };
+      case 'last_7d':
+        return { from: ago(7), to: '' };
+      case 'last_30d':
+        return { from: ago(30), to: '' };
+      case 'last_year':
+        return { from: ago(365), to: '' };
+      case 'older':
+        return { from: '', to: ago(365) };
+      default:
+        return { from: '', to: '' };
+    }
+  }
+
+  const activeDomainFilters = $derived(
+    new Set([...query.matchAll(/\bdomain:(\S+)/g)].map((m) => m[1])),
+  );
+  const activeLanguageFilters = $derived(
+    new Set([...query.matchAll(/\blanguage:(\S+)/g)].map((m) => m[1])),
+  );
+  const activeTypeFilters = $derived(
+    new Set([...query.matchAll(/\btype:(\S+)/g)].map((m) => m[1])),
+  );
+  const activeDateBucket = $derived(
+    (() => {
+      if (!dateFrom && !dateTo) return null;
+      const now = new Date();
+      const toISO = (d: Date) => d.toISOString().slice(0, 10);
+      const ago = (days: number) => toISO(new Date(now.getTime() - days * 86400 * 1000));
+      const buckets = [
+        { name: 'last_24h', from: ago(1), to: '' },
+        { name: 'last_7d', from: ago(7), to: '' },
+        { name: 'last_30d', from: ago(30), to: '' },
+        { name: 'last_year', from: ago(365), to: '' },
+        { name: 'older', from: '', to: ago(365) },
+      ];
+      return buckets.find((b) => b.from === dateFrom && b.to === dateTo)?.name ?? null;
+    })(),
+  );
+  const activeFilterCount = $derived(
+    activeDomainFilters.size +
+      activeLanguageFilters.size +
+      activeTypeFilters.size +
+      (activeDateBucket ? 1 : 0),
+  );
+
+  function showFacetCategory(name: string, activeFilters: Set<string>) {
+    return (currentFacets?.terms?.[name]?.terms?.length ?? 0) > 1 || activeFilters.size > 0;
+  }
+  const showDomainsFacet = $derived(showFacetCategory('domains', activeDomainFilters));
+  const showLanguagesFacet = $derived(showFacetCategory('languages', activeLanguageFilters));
+  const showTypesFacet = $derived(showFacetCategory('types', activeTypeFilters));
+  const showFiltersButton = $derived(hasResults || activeFilterCount > 0);
+
+  function toggleQueryToken(prefix: string, value: string) {
+    const token = `${prefix}:${value}`;
+    if (query.includes(token)) {
+      query = query.replace(token, '').replace(/\s+/g, ' ').trim();
+    } else {
+      query = query.trim() ? `${query.trim()} ${token}` : token;
+    }
+  }
+
+  function toggleDateBucket(name: string) {
+    if (activeDateBucket === name) {
+      dateFrom = '';
+      dateTo = '';
+      sendQuery(query);
+    } else {
+      const { from, to } = dateRangeForBucket(name);
+      dateFrom = from;
+      dateTo = to;
+    }
+  }
 
   function connect() {
     wsManager = new WebSocketManager(config.wsUrl, {
@@ -683,6 +847,15 @@
     return 'api/file?path=' + encodeURIComponent(path);
   }
 
+  function displayResultPath(url: string, domain: string): string {
+    const withoutProtocol = url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+    const withoutDomain =
+      domain && withoutProtocol.startsWith(domain)
+        ? withoutProtocol.slice(domain.length)
+        : withoutProtocol;
+    return withoutDomain || '/';
+  }
+
   function openReadable(e: Event, url: string, title: string) {
     e.preventDefault();
     if (e.stopPropagation) e.stopPropagation();
@@ -695,7 +868,6 @@
       panelUrl = url;
       return;
     }
-    // Mobile: open fullscreen preview instead of popup dialog
     panelUrl = url;
     panelHintTitle = title;
     previewFullscreen = true;
@@ -943,43 +1115,45 @@
 
   let statsLoaded = $state(false);
 
+  function addAnimation(target: HTMLElement | null | undefined, options: any) {
+    if (!target) {
+      return;
+    }
+    animationHandles.push(animate(target, options));
+  }
+
   function startHeroAnimations() {
     cleanupAnimations();
 
-    if (heroTitleEl) {
-      animationHandles.push(
-        animate(heroTitleEl, {
-          backgroundPosition: ['0% 50%', '100% 50%'],
-          ease: 'inOutSine',
-          duration: 6000,
-          loop: true,
-          alternate: true,
-        }),
-      );
-    }
+    addAnimation(heroTitleEl, {
+      backgroundPosition: ['0% 50%', '100% 50%'],
+      ease: 'inOutSine',
+      duration: 6000,
+      loop: true,
+      alternate: true,
+    });
 
-    if (kbdEl) {
-      animationHandles.push(
-        animate(kbdEl, {
-          translateY: [0, 3, 0],
-          duration: 400,
-          ease: 'inOutSine',
-          loop: true,
-          loopDelay: 10000,
-        }),
-      );
-    }
+    addAnimation(kbdEl, {
+      translateY: [0, 3, 0],
+      duration: 400,
+      ease: 'inOutSine',
+      loop: true,
+      loopDelay: 10000,
+    });
 
-    if (underlineEl) {
-      animationHandles.push(
-        animate(underlineEl, {
-          scaleX: [0, 1],
-          duration: 800,
-          ease: 'outCubic',
-          delay: 300,
-        }),
-      );
-    }
+    addAnimation(underlineEl, {
+      scaleX: [0, 1],
+      duration: 800,
+      ease: 'outCubic',
+      delay: 300,
+    });
+
+    addAnimation(searchBoxEl, {
+      translateY: [8, 0],
+      opacity: [0, 1],
+      duration: 420,
+      ease: 'outCubic',
+    });
   }
 
   function animateCounters() {
@@ -1166,10 +1340,12 @@
   >
     <Dialog.Header class="bg-hister-indigo flex-row items-center justify-between gap-2 px-5 py-4">
       <Dialog.Title class="flex items-center gap-2">
-        <Keyboard class="size-5 text-white" />
-        <span class="font-outfit text-lg font-extrabold text-white">Keyboard Shortcuts</span>
+        <Keyboard class="text-primary-foreground size-5" />
+        <span class="font-outfit text-primary-foreground text-lg font-extrabold"
+          >Keyboard Shortcuts</span
+        >
       </Dialog.Title>
-      <Dialog.Close class="p-0.5 text-white/70 hover:text-white">
+      <Dialog.Close class="text-primary-foreground/70 hover:text-primary-foreground p-0.5">
         <X class="size-5" />
       </Dialog.Close>
     </Dialog.Header>
@@ -1203,12 +1379,13 @@
   <Dialog.Content
     escapeKeydownBehavior="ignore"
     showCloseButton={false}
-    class="border-border-brand bg-card-surface flex max-h-[80vh] max-w-md flex-col gap-0 overflow-hidden rounded-none border-[3px] p-0 shadow-[6px_6px_0px_black]"
+    class="border-border-brand bg-card-surface flex max-h-[80vh] max-w-md flex-col gap-0 overflow-hidden rounded-none border-[3px] p-0 shadow-[6px_6px_0px_var(--brutal-shadow)]"
   >
     <Dialog.Header class="bg-hister-rose flex-row items-center justify-between gap-2 px-5 py-4">
       <Dialog.Title class="flex items-center gap-2">
-        <Trash2 class="size-5 text-white" />
-        <span class="font-outfit text-lg font-extrabold text-white">Delete result</span>
+        <Trash2 class="text-primary-foreground size-5" />
+        <span class="font-outfit text-primary-foreground text-lg font-extrabold">Delete result</span
+        >
       </Dialog.Title>
     </Dialog.Header>
     <div class="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
@@ -1235,7 +1412,7 @@
       </Button>
       <Button
         size="sm"
-        class="bg-hister-rose hover:bg-hister-rose/90 rounded-none border-0 text-white"
+        class="bg-hister-rose text-primary-foreground hover:bg-hister-rose/90 rounded-none border-0"
         onclick={confirmDelete}
       >
         Yes, delete
@@ -1248,12 +1425,12 @@
   <Dialog.Content
     escapeKeydownBehavior="ignore"
     showCloseButton={false}
-    class="border-border-brand bg-card-surface flex max-h-[80vh] max-w-md flex-col gap-0 overflow-hidden rounded-none border-[3px] p-0 shadow-[6px_6px_0px_black]"
+    class="border-border-brand bg-card-surface flex max-h-[80vh] max-w-md flex-col gap-0 overflow-hidden rounded-none border-[3px] p-0 shadow-[6px_6px_0px_var(--brutal-shadow)]"
   >
     <Dialog.Header class="bg-hister-rose flex-row items-center justify-between gap-2 px-5 py-4">
       <Dialog.Title class="flex items-center gap-2">
-        <Trash2 class="size-5 text-white" />
-        <span class="font-outfit text-lg font-extrabold text-white"
+        <Trash2 class="text-primary-foreground size-5" />
+        <span class="font-outfit text-primary-foreground text-lg font-extrabold"
           >Delete all matching results</span
         >
       </Dialog.Title>
@@ -1287,7 +1464,7 @@
       </Button>
       <Button
         size="sm"
-        class="bg-hister-rose hover:bg-hister-rose/90 rounded-none border-0 text-white"
+        class="bg-hister-rose text-primary-foreground hover:bg-hister-rose/90 rounded-none border-0"
         onclick={confirmDeleteAll}
       >
         Yes, delete all
@@ -1334,18 +1511,43 @@
           </Tooltip.Root>
         </Tooltip.Provider>
       {/if}
-      <Tooltip.Provider delayDuration={0}>
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            <div class="h-3 w-3 shrink-0 {connected ? 'bg-hister-lime' : 'bg-hister-rose'}"></div>
-          </Tooltip.Trigger>
-          <Tooltip.Portal>
-            <Tooltip.Content>
-              Server: {connected ? 'Connected' : 'Disconnected'}
-            </Tooltip.Content>
-          </Tooltip.Portal>
-        </Tooltip.Root>
-      </Tooltip.Provider>
+      <div class="flex shrink-0 items-center gap-1">
+        {#if query}
+          <button
+            type="button"
+            class="text-text-brand-muted hover:bg-muted-surface hover:text-text-brand flex h-8 w-8 items-center justify-center transition-colors md:h-9 md:w-9"
+            aria-label="Clear search"
+            title="Clear search"
+            onclick={() => {
+              query = '';
+              resultsShown = false;
+              inputEl?.focus();
+            }}
+          >
+            <X class="size-4" />
+          </button>
+        {/if}
+        <Tooltip.Provider delayDuration={0}>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              <button
+                type="button"
+                class="text-text-brand-muted hover:bg-muted-surface flex h-8 items-center gap-2 px-2 text-xs font-semibold transition-colors md:h-9 md:px-3"
+                aria-label="Server {connected ? 'connected' : 'disconnected'}"
+              >
+                <span class="h-2 w-2 shrink-0 {connected ? 'bg-hister-lime' : 'bg-hister-rose'}"
+                ></span>
+                <span class="hidden md:inline">{connected ? 'Online' : 'Offline'}</span>
+              </button>
+            </Tooltip.Trigger>
+            <Tooltip.Portal>
+              <Tooltip.Content>
+                Server: {connected ? 'Connected' : 'Disconnected'}
+              </Tooltip.Content>
+            </Tooltip.Portal>
+          </Tooltip.Root>
+        </Tooltip.Provider>
+      </div>
     </div>
     {#if autocomplete && autocomplete !== query}
       <span class="font-fira text-text-brand-muted mx-8 text-sm">
@@ -1355,8 +1557,11 @@
 
     <div class="flex min-h-0 flex-1 overflow-hidden" bind:this={splitContainerEl}>
       {#if !previewFullscreen}
-        <ScrollArea class="min-h-0 flex-1">
-          <div class="w-full max-w-[70em] space-y-3 overflow-x-hidden px-3 py-2 md:px-6">
+        <ScrollArea class="results-scroll min-h-0 min-w-0 flex-1 overflow-hidden">
+          <div
+            class="results-list w-full max-w-[70em] space-y-3 overflow-x-hidden px-3 py-2 md:px-6"
+            class:results-list-panel={lastResults && panelOpen && isDesktop && !disablePreviews}
+          >
             {#if deleteError}
               <div
                 class="border-hister-rose bg-hister-rose/10 text-hister-rose flex items-center justify-between gap-2 border-[2px] px-3 py-2 text-sm"
@@ -1370,13 +1575,15 @@
               </div>
             {/if}
             {#if hasResults}
-              <div class="flex flex-wrap items-center justify-between gap-2">
-                <span class="font-outfit text-hister-indigo text-sm font-bold md:text-base">
+              <div
+                class="results-toolbar flex min-w-0 flex-wrap items-center justify-between gap-2 px-1 py-2"
+              >
+                <span class="font-outfit text-text-brand text-sm font-bold md:text-base">
                   {semanticOn && config.semanticEnabled
                     ? totalResults
                     : lastResults?.total || totalResults} results{query ? ` for "${query}"` : ''}
                 </span>
-                <div class="flex items-center gap-2">
+                <div class="flex min-w-0 flex-wrap items-center justify-end gap-2 overflow-hidden">
                   {#if isDesktop && !panelOpen && !disablePreviews}
                     <Button
                       variant="ghost"
@@ -1391,18 +1598,208 @@
                       Preview
                     </Button>
                   {/if}
-                  <DropdownMenu.Root>
+                  {#if showFiltersButton}
+                    <DropdownMenu.Root bind:open={filtersDropdownOpen}>
+                      <DropdownMenu.Trigger>
+                        {#snippet child({ props })}
+                          <Button
+                            {...props}
+                            variant="ghost"
+                            size="sm"
+                            class="font-inter gap-1 text-xs {filtersDropdownOpen
+                              ? 'text-hister-indigo'
+                              : 'text-text-brand-muted hover:text-hister-indigo'}"
+                          >
+                            <Filter class="size-3" />
+                            Filters
+                            {#if activeFilterCount > 0}
+                              <span
+                                class="bg-hister-indigo text-background flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-bold leading-none"
+                                >{activeFilterCount}</span
+                              >
+                            {/if}
+                            <ChevronDown
+                              class="size-3 transition-transform duration-200 {filtersDropdownOpen
+                                ? 'rotate-180'
+                                : ''}"
+                            />
+                          </Button>
+                        {/snippet}
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Content
+                        class="border-brutal-border bg-card-surface w-80 rounded-none border-[3px] p-3 shadow-[4px_4px_0_var(--brutal-shadow)]"
+                      >
+                        <div class="space-y-3">
+                          {#snippet facetSection(
+                            facetName: string,
+                            label: string,
+                            Icon: typeof Globe,
+                            prefix: string,
+                            activeFilters: Set<string>,
+                            showSeparator: boolean,
+                          )}
+                            {#if showSeparator}
+                              <Separator class="bg-border-brand-muted" />
+                            {/if}
+                            <div class="space-y-1.5">
+                              <p
+                                class="font-inter text-text-brand-muted flex items-center gap-1.5 text-xs font-semibold"
+                              >
+                                <Icon class="size-3" />
+                                {label}
+                              </p>
+                              <div class="flex flex-wrap gap-1">
+                                {#each currentFacets?.terms?.[facetName]?.terms ?? [] as { term, count } (term)}
+                                  <button
+                                    class="font-inter cursor-pointer rounded-none border-[2px] px-2 py-0.5 text-xs transition-colors {activeFilters.has(
+                                      term,
+                                    )
+                                      ? 'border-hister-indigo bg-hister-indigo text-background'
+                                      : 'border-border-brand-muted text-text-brand-secondary hover:border-hister-indigo hover:text-hister-indigo'}"
+                                    onclick={() => toggleQueryToken(prefix, term)}
+                                  >
+                                    {term}
+                                    <span class="opacity-60">({count})</span>
+                                  </button>
+                                {/each}
+                              </div>
+                              {#if currentFacets?.terms?.[facetName]?.other}
+                                <button
+                                  class="font-inter text-text-brand-muted hover:text-hister-indigo mt-1 cursor-pointer text-xs underline-offset-2 hover:underline"
+                                  onclick={() => loadMoreFacet(facetName)}>Load more</button
+                                >
+                              {/if}
+                            </div>
+                          {/snippet}
+                          {#if facetsLoading}
+                            <p class="font-inter text-text-brand-muted text-xs">Loading filters…</p>
+                          {:else}
+                            {#if showDomainsFacet}
+                              {@render facetSection(
+                                'domains',
+                                'Domains',
+                                Globe,
+                                'domain',
+                                activeDomainFilters,
+                                false,
+                              )}
+                            {/if}
+                            {#if showLanguagesFacet}
+                              {@render facetSection(
+                                'languages',
+                                'Languages',
+                                Globe,
+                                'language',
+                                activeLanguageFilters,
+                                showDomainsFacet,
+                              )}
+                            {/if}
+                            {#if showTypesFacet}
+                              {@render facetSection(
+                                'types',
+                                'Type',
+                                Tag,
+                                'type',
+                                activeTypeFilters,
+                                showDomainsFacet || showLanguagesFacet,
+                              )}
+                            {/if}
+                            {#snippet customDateInputs()}
+                              <details class="group/custom w-full">
+                                <summary
+                                  class="font-inter text-text-brand-muted hover:text-hister-indigo cursor-pointer list-none text-xs underline-offset-2 hover:underline"
+                                  >Custom</summary
+                                >
+                                <div
+                                  class="mt-1.5 grid grid-cols-[auto_1fr] items-center gap-x-1.5 gap-y-2"
+                                >
+                                  <span class="font-inter text-text-brand-secondary text-xs"
+                                    >From:</span
+                                  >
+                                  <Input
+                                    type="date"
+                                    bind:value={dateFrom}
+                                    class="border-border-brand-muted bg-card-surface text-text-brand font-fira focus-visible:border-hister-indigo h-7 w-auto min-w-0 border-[2px] px-2 text-xs shadow-none focus-visible:ring-0"
+                                  />
+                                  <span class="font-inter text-text-brand-secondary text-xs"
+                                    >To:</span
+                                  >
+                                  <Input
+                                    type="date"
+                                    bind:value={dateTo}
+                                    class="border-border-brand-muted bg-card-surface text-text-brand font-fira focus-visible:border-hister-indigo h-7 w-auto min-w-0 border-[2px] px-2 text-xs shadow-none focus-visible:ring-0"
+                                  />
+                                </div>
+                              </details>
+                            {/snippet}
+                            {#if currentFacets?.date_histogram?.some((b) => b.count > 0)}
+                              {#if showDomainsFacet || showLanguagesFacet || showTypesFacet}
+                                <Separator class="bg-border-brand-muted" />
+                              {/if}
+                              <div class="space-y-1.5">
+                                <p
+                                  class="font-inter text-text-brand-muted flex items-center gap-1.5 text-xs font-semibold"
+                                >
+                                  <Calendar class="size-3" />
+                                  Date
+                                </p>
+                                <div class="flex flex-col gap-1">
+                                  {#each currentFacets.date_histogram as { name, count } (name)}
+                                    {#if count > 0}
+                                      <button
+                                        class="font-inter flex cursor-pointer items-center justify-between rounded-none border-[2px] px-2 py-1 text-xs transition-colors {activeDateBucket ===
+                                        name
+                                          ? 'border-hister-indigo bg-hister-indigo text-background'
+                                          : 'border-border-brand-muted text-text-brand-secondary hover:border-hister-indigo hover:text-hister-indigo'}"
+                                        onclick={() => toggleDateBucket(name)}
+                                      >
+                                        <span>{bucketLabels[name] ?? name}</span>
+                                        <span class="opacity-60">{count}</span>
+                                      </button>
+                                    {/if}
+                                  {/each}
+                                </div>
+                                {@render customDateInputs()}
+                              </div>
+                            {:else}
+                              <div class="space-y-1.5">
+                                <p
+                                  class="font-inter text-text-brand-muted flex items-center gap-1.5 text-xs font-semibold"
+                                >
+                                  <Calendar class="size-3" />
+                                  Date
+                                </p>
+                                {@render customDateInputs()}
+                              </div>
+                            {/if}
+                            {#if !currentFacets?.terms?.['domains']?.terms?.length && !currentFacets?.terms?.['languages']?.terms?.length && !currentFacets?.date_histogram?.some((b) => b.count > 0)}
+                              <p class="font-inter text-text-brand-muted text-xs">
+                                No filters available for this query.
+                              </p>
+                            {/if}
+                          {/if}
+                        </div>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Root>
+                  {/if}
+                  <DropdownMenu.Root bind:open={actionsDropdownOpen}>
                     <DropdownMenu.Trigger>
                       {#snippet child({ props })}
                         <Button
                           {...props}
                           variant="ghost"
                           size="sm"
-                          class="font-inter text-text-brand-muted hover:text-hister-indigo gap-1 text-xs"
+                          class="font-inter gap-1 text-xs {actionsDropdownOpen
+                            ? 'text-hister-indigo'
+                            : 'text-text-brand-muted hover:text-hister-indigo'}"
                         >
-                          <Filter class="size-3" />
-                          Search Actions
-                          <ChevronDown class="size-3" />
+                          <SlidersHorizontal class="size-3" />
+                          Actions
+                          <ChevronDown
+                            class="size-3 transition-transform duration-200 {actionsDropdownOpen
+                              ? 'rotate-180'
+                              : ''}"
+                          />
                         </Button>
                       {/snippet}
                     </DropdownMenu.Trigger>
@@ -1410,37 +1807,6 @@
                       class="border-brutal-border bg-card-surface w-80 rounded-none border-[3px] p-3 shadow-[4px_4px_0_var(--brutal-shadow)]"
                     >
                       <div class="space-y-3">
-                        <div class="space-y-2">
-                          <p
-                            class="font-inter text-text-brand-muted flex items-center gap-1.5 text-xs font-semibold"
-                          >
-                            <Calendar class="size-3" />
-                            Date Filter
-                          </p>
-                          <div class="flex flex-col gap-2">
-                            <label
-                              class="font-inter text-text-brand-secondary flex items-center gap-1.5 text-xs"
-                            >
-                              From:
-                              <Input
-                                type="date"
-                                bind:value={dateFrom}
-                                class="border-border-brand-muted bg-card-surface text-text-brand font-fira focus-visible:border-hister-indigo h-7 flex-1 border-[2px] px-2 text-xs shadow-none focus-visible:ring-0"
-                              />
-                            </label>
-                            <label
-                              class="font-inter text-text-brand-secondary flex items-center gap-1.5 text-xs"
-                            >
-                              To:
-                              <Input
-                                type="date"
-                                bind:value={dateTo}
-                                class="border-border-brand-muted bg-card-surface text-text-brand font-fira focus-visible:border-hister-indigo h-7 flex-1 border-[2px] px-2 text-xs shadow-none focus-visible:ring-0"
-                              />
-                            </label>
-                          </div>
-                        </div>
-                        <Separator class="bg-border-brand-muted" />
                         {#if config.semanticEnabled && semanticOn}
                           <div class="space-y-2">
                             <p
@@ -1582,15 +1948,15 @@
                   {@const state = getResultState(r.url, r.label)}
                   <article
                     data-result
-                    class="flex w-full scroll-my-[6em] gap-3 overflow-hidden py-3.5 transition-all duration-150"
-                    style={i === highlightIdx
-                      ? `background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--${color}) 12%, transparent), transparent); border-left: 3px solid var(--${color}); padding-left: 0.75rem;`
-                      : ''}
+                    class="result-card flex w-full scroll-my-[6em] gap-3 transition-all duration-150"
+                    class:result-card-active={i === highlightIdx}
+                    class:mt-2.5={i !== 0}
+                    style="--result-color: var(--{color});"
                   >
                     <div class="w-0 min-w-0 flex-1 space-y-0.5">
-                      <div class="flex items-center gap-1.5">
+                      <div class="flex min-w-0 items-center gap-1.5">
                         <div
-                          class="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden"
+                          class="result-favicon flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden"
                           style="background-color: var(--{color});"
                         >
                           {#if favSrc}
@@ -1611,21 +1977,20 @@
                               }}
                             />
                             {#if r.isPinned}
-                              <Star class="hidden size-3 text-white" />
+                              <Star class="text-primary-foreground hidden size-3" />
                             {:else}
-                              <Globe class="hidden size-3 text-white" />
+                              <Globe class="text-primary-foreground hidden size-3" />
                             {/if}
                           {:else if r.isPinned}
-                            <Star class="size-3 text-white" />
+                            <Star class="text-primary-foreground size-3" />
                           {:else}
-                            <Globe class="size-3 text-white" />
+                            <Globe class="text-primary-foreground size-3" />
                           {/if}
                         </div>
                         <a
                           data-result-link={r.url}
                           href={fileResultUrl(r.url)}
-                          class="font-outfit text-md min-w-0 flex-1 font-semibold hover:underline md:text-xl"
-                          style="color: var(--{color});"
+                          class="result-title font-outfit text-md min-w-0 flex-1 font-semibold hover:underline md:text-xl"
                           target={config.openResultsOnNewTab ? '_blank' : undefined}
                           onclick={() => {
                             sendHistoryBeacon(r.url, r.title || '*title*', query);
@@ -1649,68 +2014,99 @@
                           {removeResultsByDomain}
                         />
                       </div>
-                      <div class="flex items-center gap-2">
-                        <span
-                          class="font-fira text-hister-teal truncate overflow-hidden text-xs text-ellipsis whitespace-nowrap md:text-sm"
-                          >{r.url}</span
-                        >
-                        {#if r.isPinned}
-                          <Badge
-                            variant="secondary"
-                            class="bg-hister-teal/10 text-hister-teal h-4 border-0 px-1.5 py-0"
-                            >pinned</Badge
-                          >
-                        {:else if r.added}
+                      <div
+                        class="result-meta flex min-w-0 max-w-full items-center gap-x-3 gap-y-1 overflow-hidden"
+                      >
+                        <div class="result-url-line flex min-w-0 max-w-full shrink items-center">
                           <span
-                            class="font-inter text-text-brand-muted text-xs whitespace-nowrap md:text-sm"
-                            title={formatTimestamp(r.added)}>· {formatRelativeTime(r.added)}</span
+                            class="result-url-text min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-xs md:text-sm"
+                            title={r.url}
                           >
-                        {/if}
-                        {#if state.displayLabel}
-                          <Badge
-                            variant="secondary"
-                            class="bg-hister-teal/20 h-4 max-w-[8rem] shrink-0 truncate border-0 px-1.5 py-0"
-                            title={state.displayLabel}
-                          >
-                            <Tag class="mr-0.5 size-2.5 shrink-0" />{state.displayLabel}
-                          </Badge>
-                        {/if}
-                        {#if !disablePreviews}
-                          <Button
-                            data-readable
-                            variant="link"
-                            size="sm"
-                            class="text-hister-indigo h-auto shrink-0 cursor-pointer gap-0.5 p-0 text-xs font-medium md:text-sm"
-                            onclick={(e) => {
-                              highlightIdx = i;
-                              openReadable(e, r.url, r.title || '*title*');
+                            {#if r.domain}<span class="result-domain font-inter font-semibold"
+                                >{r.domain}</span
+                              >{/if}<span class="result-path font-fira text-text-brand-muted"
+                              >{displayResultPath(r.url, r.domain)}</span
+                            >
+                          </span>
+                        </div>
+                        <div
+                          class="result-secondary-meta flex shrink-0 items-center gap-x-3 gap-y-1"
+                        >
+                          <button
+                            class="text-text-brand-muted hover:text-text-brand shrink-0 cursor-pointer"
+                            title="Copy URL"
+                            onclick={async () => {
+                              await navigator.clipboard.writeText(r.url);
+                              copiedUrl = r.url;
+                              setTimeout(() => {
+                                copiedUrl = null;
+                              }, 1500);
                             }}
                           >
-                            <Eye class="size-3" /><span>view</span>
-                          </Button>
-                        {/if}
-                        {#if !r.isPinned && r.finalScore && config.semanticEnabled && semanticOn}
-                          <Tooltip.Provider delayDuration={0}>
-                            <Tooltip.Root>
-                              <Tooltip.Trigger>
-                                <Badge
-                                  variant="secondary"
-                                  class="bg-hister-indigo/10 text-hister-indigo shrink-0 border-0 px-1.5 py-0 align-middle font-mono text-[10px]"
-                                  >{r.finalScore?.toFixed(2)}</Badge
-                                >
-                              </Tooltip.Trigger>
-                              <Tooltip.Portal>
-                                <Tooltip.Content>
-                                  Result score: {r.finalScore?.toFixed(2)}
-                                </Tooltip.Content>
-                              </Tooltip.Portal>
-                            </Tooltip.Root>
-                          </Tooltip.Provider>
-                        {/if}
+                            {#if copiedUrl === r.url}
+                              <Check class="size-3 text-hister-teal" />
+                            {:else}
+                              <Copy class="size-3" />
+                            {/if}
+                          </button>
+                          {#if r.isPinned}
+                            <Badge
+                              variant="secondary"
+                              class="bg-hister-teal/10 text-hister-teal h-4 border-0 px-1.5 py-0"
+                              >pinned</Badge
+                            >
+                          {:else if r.added}
+                            <span
+                              class="font-inter text-text-brand-muted text-xs whitespace-nowrap md:text-sm"
+                              title={formatTimestamp(r.added)}>{formatRelativeTime(r.added)}</span
+                            >
+                          {/if}
+                          {#if state.displayLabel}
+                            <Badge
+                              variant="secondary"
+                              class="result-label bg-hister-teal/20 min-h-4 shrink-0 border-0 px-1.5 py-0"
+                              title={state.displayLabel}
+                            >
+                              <Tag class="mr-0.5 size-2.5 shrink-0" />{state.displayLabel}
+                            </Badge>
+                          {/if}
+                          {#if !disablePreviews}
+                            <Button
+                              data-readable
+                              variant="link"
+                              size="sm"
+                              class="text-text-brand-muted hover:text-hister-indigo h-auto shrink-0 cursor-pointer gap-0.5 p-0 text-xs font-medium md:text-sm"
+                              onclick={(e) => {
+                                highlightIdx = i;
+                                openReadable(e, r.url, r.title || '*title*');
+                              }}
+                            >
+                              <Eye class="size-3" /><span>view</span>
+                            </Button>
+                          {/if}
+                          {#if !r.isPinned && r.finalScore && config.semanticEnabled && semanticOn}
+                            <Tooltip.Provider delayDuration={0}>
+                              <Tooltip.Root>
+                                <Tooltip.Trigger>
+                                  <Badge
+                                    variant="secondary"
+                                    class="bg-hister-indigo/10 text-hister-indigo shrink-0 border-0 px-1.5 py-0 align-middle font-mono text-[10px]"
+                                    >{r.finalScore?.toFixed(2)}</Badge
+                                  >
+                                </Tooltip.Trigger>
+                                <Tooltip.Portal>
+                                  <Tooltip.Content>
+                                    Result score: {r.finalScore?.toFixed(2)}
+                                  </Tooltip.Content>
+                                </Tooltip.Portal>
+                              </Tooltip.Root>
+                            </Tooltip.Provider>
+                          {/if}
+                        </div>
                       </div>
                       {#if r.text}
                         <p
-                          class="font-inter text-text-brand-secondary text-sm leading-[1.4] md:text-base"
+                          class="result-snippet font-inter text-text-brand-secondary text-sm leading-[1.45] md:text-base"
                         >
                           {@html r.text}
                         </p>
@@ -1763,12 +2159,15 @@
           <!-- Drag handle to resize the split-screen panel -->
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
           <div
-            class="hover:bg-hister-indigo/40 w-1.5 shrink-0 cursor-col-resize bg-transparent transition-colors"
+            class="split-resize-handle shrink-0 cursor-col-resize"
             onmousedown={startPanelResize}
             role="separator"
             aria-label="Resize preview panel"
           ></div>
-          <div style="width: {panelWidthPct}%; flex: none;" class="flex min-h-0 overflow-hidden">
+          <div
+            style="width: {panelWidthPct}%; flex: none;"
+            class="preview-shell bg-card-surface relative z-10 flex min-h-0 overflow-hidden"
+          >
             <PreviewPanel
               url={panelUrl}
               hintTitle={panelHintTitle}
@@ -1778,6 +2177,7 @@
                 localStorage.setItem('hister-panel-open', 'false');
               }}
               onfullscreentoggle={enterFullscreen}
+              connected={true}
             />
           </div>
         {/if}
@@ -1786,7 +2186,7 @@
   </div>
 {:else}
   <div
-    class="relative flex flex-1 flex-col items-center gap-5 overflow-y-auto px-4 py-4 md:gap-10 md:px-12 md:py-12"
+    class="relative flex flex-1 flex-col items-center gap-5 overflow-y-auto px-4 py-8 md:gap-8 md:px-12 md:py-12"
   >
     <h1
       bind:this={heroTitleEl}
@@ -1796,7 +2196,7 @@
       Hister
     </h1>
 
-    <p class="font-inter text-md text-text-brand-secondary md:text-lg">Your own search engine</p>
+    <p class="font-inter text-text-brand-secondary text-sm md:text-lg">Your own search engine</p>
     <div
       bind:this={underlineEl}
       class="h-[3px] w-48"
@@ -1805,37 +2205,36 @@
 
     <div
       bind:this={searchBoxEl}
-      class="search-box-gradient w-full max-w-[1200px] p-[3px] shadow-[4px_4px_0px_var(--hister-coral)]"
+      class="home-search border-brutal-border bg-card-surface flex h-12 w-full max-w-[1100px] items-center gap-3 border-[3px] px-4 md:h-15 md:px-5"
     >
-      <div class="bg-card-surface flex h-10 items-center gap-3 pl-4 md:h-14">
-        <Search class="text-text-brand-muted size-6" />
-        <Input
-          bind:ref={inputEl}
-          bind:value={query}
-          type="search"
-          placeholder="Search ..."
-          class="font-inter text-text-brand placeholder:text-text-brand-muted h-full min-w-0 flex-1 border-0 bg-transparent p-0 shadow-none focus-visible:ring-0 md:text-lg"
-        />
-        <Tooltip.Provider delayDuration={0}>
-          <Tooltip.Root>
-            <Tooltip.Trigger class="mr-4">
-              <div class="h-3 w-3 shrink-0 {connected ? 'bg-hister-lime' : 'bg-hister-rose'}"></div>
-            </Tooltip.Trigger>
-            <Tooltip.Portal>
-              <Tooltip.Content>
-                Server: {connected ? 'Connected' : 'Disconnected'}
-              </Tooltip.Content>
-            </Tooltip.Portal>
-          </Tooltip.Root>
-        </Tooltip.Provider>
-      </div>
+      <Search class="text-hister-indigo size-5 shrink-0 md:size-6" />
+      <Input
+        bind:ref={inputEl}
+        bind:value={query}
+        type="search"
+        placeholder="Search..."
+        class="font-inter text-text-brand placeholder:text-text-brand-muted h-full min-w-0 flex-1 border-0 bg-transparent p-0 text-lg font-medium shadow-none focus-visible:ring-0 md:text-2xl"
+      />
+      <Tooltip.Provider delayDuration={0}>
+        <Tooltip.Root>
+          <Tooltip.Trigger class="flex h-8 w-8 items-center justify-center">
+            <div
+              class="h-2.5 w-2.5 shrink-0 {connected ? 'bg-hister-lime' : 'bg-hister-rose'}"
+            ></div>
+          </Tooltip.Trigger>
+          <Tooltip.Portal>
+            <Tooltip.Content>
+              Server: {connected ? 'Connected' : 'Disconnected'}
+            </Tooltip.Content>
+          </Tooltip.Portal>
+        </Tooltip.Root>
+      </Tooltip.Provider>
     </div>
 
     <div
-      bind:this={hintEl}
       class="font-inter text-text-brand-muted hidden items-center gap-1 text-xs md:flex md:gap-2"
     >
-      <span>Pro tip:</span>
+      <span>Tip:</span>
       {#each currentTip as part}
         {#if part.type === 'text'}
           <span>{part.value}</span>
@@ -1867,13 +2266,13 @@
     {#if recentSearches.length > 0}
       <div
         bind:this={chipsContainerEl}
-        class="relative flex flex-wrap items-center justify-center gap-3"
+        class="relative flex max-w-[900px] flex-wrap items-center justify-center gap-2"
       >
-        {#each recentSearches as search, i}
+        {#each recentSearches.slice(0, 8) as search, i}
           {@const chip = chipColors[i % chipColors.length]}
           <Button
             variant="outline"
-            class="border-[3px] {chip.border} {chip.bg} font-inter px-3.5 py-1.5 text-sm font-semibold {chip.text} brutal-press h-auto rounded-none"
+            class="border-[2px] {chip.border} {chip.bg} font-inter h-auto cursor-pointer rounded-none px-3 py-1.5 text-sm font-semibold {chip.text} hover:translate-x-px hover:translate-y-px hover:shadow-[2px_2px_0_var(--brutal-shadow)]"
             onclick={() => clickChip(search)}
             oncontextmenu={(e) => showChipContextMenu(e, search)}
           >
@@ -1883,14 +2282,32 @@
         <Button
           variant="ghost"
           size="sm"
-          class="border-hister-rose/40 font-inter text-hister-rose/60 hover:text-hister-rose hover:border-hister-rose hover:bg-hister-rose/10 h-auto rounded-none border-[2px] px-2.5 py-1.5 text-xs font-semibold transition-all duration-200"
+          class="font-inter text-text-brand-muted hover:text-hister-rose h-auto cursor-pointer px-2 py-1 text-xs"
           onclick={deleteAllRecentSearches}
           title="Clear all recent searches"
         >
-          &times; clear
+          Clear
         </Button>
       </div>
     {/if}
+
+    <div bind:this={statsRowEl} class="flex flex-col items-center gap-3 md:flex-row md:gap-4">
+      <div class="home-stat-pill text-hister-indigo">
+        <History class="size-3.5 md:size-4" />
+        <span class="font-outfit text-xl font-extrabold">{displayHistoryCount}</span>
+        <span class="font-inter text-text-brand-secondary text-sm">pages</span>
+      </div>
+      <div class="home-stat-pill text-hister-teal">
+        <Shield class="size-3.5 md:size-4" />
+        <span class="font-outfit text-xl font-extrabold">{displayRulesCount}</span>
+        <span class="font-inter text-text-brand-secondary text-sm">rules</span>
+      </div>
+      <div class="home-stat-pill text-hister-coral">
+        <Link2 class="size-3.5 md:size-4" />
+        <span class="font-outfit text-xl font-extrabold">{displayAliasesCount}</span>
+        <span class="font-inter text-text-brand-secondary text-sm">aliases</span>
+      </div>
+    </div>
 
     {#if contextMenuSearch}
       <div
@@ -1928,54 +2345,245 @@
         </Button>
       </div>
     {/if}
-
-    <div bind:this={statsRowEl} class="flex flex-col items-center gap-3 md:flex-row md:gap-8">
-      <div
-        class="border-brutal-border shadow-brutal-sm flex items-center gap-2 border-[3px] px-4 py-2"
-        style="color: var(--hister-indigo);"
-      >
-        <History class="size-3 md:size-4.5" />
-        <span class="font-outfit text-xl font-extrabold">{displayHistoryCount}</span>
-        <span class="font-inter text-sm">indexed pages</span>
-      </div>
-      <div
-        class="border-brutal-border shadow-brutal-sm flex items-center gap-2 border-[3px] px-4 py-2"
-        style="color: var(--hister-teal);"
-      >
-        <Shield class="size-3 md:size-4.5" />
-        <span class="font-outfit text-xl font-extrabold">{displayRulesCount}</span>
-        <span class="font-inter text-sm">active rules</span>
-      </div>
-      <div
-        class="border-brutal-border shadow-brutal-sm flex items-center gap-2 border-[3px] px-4 py-2"
-        style="color: var(--hister-coral);"
-      >
-        <Link2 class="size-3 md:size-4.5" />
-        <span class="font-outfit text-xl font-extrabold">{displayAliasesCount}</span>
-        <span class="font-inter text-sm">aliases</span>
-      </div>
-    </div>
   </div>
 {/if}
 
 <style>
-  .search-box-gradient {
+  .home-search {
+    position: relative;
+    overflow: hidden;
+    background: var(--card-surface);
+    box-shadow:
+      0 1px 0 color-mix(in srgb, white 7%, transparent) inset,
+      4px 4px 0 var(--brutal-shadow);
+  }
+
+  .home-stat-pill {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    overflow: hidden;
+    border: 2px solid var(--border-muted-brand);
+    background:
+      linear-gradient(90deg, color-mix(in srgb, currentColor 8%, transparent), transparent 52%),
+      var(--card-surface);
+    padding: 0.5rem 0.875rem;
+    box-shadow: 2px 2px 0 var(--brutal-shadow);
+  }
+
+  .home-stat-pill::before {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 3px;
+    content: '';
+    background: currentColor;
+    opacity: 0.65;
+  }
+
+  .split-resize-handle {
+    position: relative;
+    z-index: 2;
+    width: 0.375rem;
+    border-left: 2px solid var(--border-brand);
+    background: var(--card-surface);
+    transition: background-color 160ms ease;
+  }
+
+  .split-resize-handle::before {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -4px;
+    width: 10px;
+    content: '';
+    background: transparent;
+  }
+
+  .split-resize-handle:hover {
+    background: color-mix(in srgb, var(--hister-indigo) 28%, transparent);
+  }
+
+  :global(.results-list-panel) {
+    box-sizing: border-box;
+    max-width: min(70em, 100%);
+    padding-right: 0;
+    overflow: clip;
+    contain: paint;
+  }
+
+  :global(.results-scroll),
+  :global(.results-scroll [data-slot='scroll-area-viewport']) {
+    min-width: 0;
+    overflow-x: clip;
+    contain: paint;
+    background: var(--card-surface);
+  }
+
+  :global(.results-toolbar) {
+    position: sticky;
+    top: 0;
+    z-index: 12;
+    max-width: 100%;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border-muted-brand);
+    background: color-mix(in srgb, var(--card-surface) 92%, transparent);
+    backdrop-filter: blur(8px);
+  }
+
+  .result-card {
+    position: relative;
+    container-type: inline-size;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    border: 0;
+    background: transparent;
+    padding: 0.875rem 0;
+    box-shadow: none;
+  }
+
+  .result-card:hover {
     background: linear-gradient(
       90deg,
-      var(--hister-indigo),
-      var(--hister-coral),
-      var(--hister-teal),
-      var(--hister-indigo)
+      color-mix(in srgb, var(--result-color) 4%, transparent),
+      transparent 44%
     );
-    background-size: 300% 100%;
-    animation: gradient-slide 6s ease-in-out infinite alternate;
   }
-  @keyframes gradient-slide {
-    0% {
-      background-position: 0% 50%;
+
+  .result-domain {
+    color: color-mix(in srgb, var(--result-color) 70%, var(--text-primary-brand));
+  }
+
+  .result-meta {
+    color: var(--text-muted-brand);
+  }
+
+  .result-card-active {
+    border-left: 3px solid var(--result-color);
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--result-color) 8%, transparent),
+      color-mix(in srgb, var(--result-color) 2%, transparent) 62%,
+      transparent
+    );
+    padding-left: 0.75rem;
+    box-shadow: none;
+  }
+
+  :global(.results-list-panel) .result-card:not(.result-card-active),
+  :global(.results-list-panel) .result-card-active {
+    width: calc(100% - 1.5rem);
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  :global(.results-list-panel) .result-card-active {
+    box-shadow: none;
+  }
+
+  .result-title {
+    color: color-mix(in srgb, var(--result-color) 82%, var(--text-primary-brand));
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .result-title:hover {
+    color: var(--result-color);
+  }
+
+  .result-snippet {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  :global(.result-label) {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    white-space: normal;
+  }
+
+  .result-url-text,
+  .result-url-text .result-domain,
+  .result-url-text .result-path {
+    overflow-wrap: normal;
+    white-space: nowrap;
+    word-break: normal;
+  }
+
+  @container (max-width: 360px) {
+    .result-meta {
+      flex-wrap: wrap;
+      overflow: visible;
     }
-    100% {
-      background-position: 100% 50%;
+
+    .result-url-line {
+      flex-basis: 100%;
+      width: 100%;
     }
+
+    .result-secondary-meta {
+      flex-basis: 100%;
+    }
+  }
+
+  :global(.result-snippet mark) {
+    color: var(--text-primary-brand);
+    background: color-mix(in srgb, var(--hister-amber) 18%, transparent);
+    padding: 0 0.12em;
+  }
+
+  :global(.dark) .home-search {
+    background: var(--card-surface);
+    box-shadow:
+      0 1px 0 color-mix(in srgb, white 10%, transparent) inset,
+      0 0 0 1px color-mix(in srgb, white 3%, transparent),
+      3px 3px 0 color-mix(in srgb, var(--hister-indigo) 16%, var(--brutal-shadow));
+  }
+
+  :global(.dark) .home-stat-pill {
+    background:
+      linear-gradient(90deg, color-mix(in srgb, currentColor 11%, transparent), transparent 54%),
+      var(--card-surface);
+    box-shadow:
+      0 1px 0 color-mix(in srgb, white 8%, transparent) inset,
+      2px 2px 0 color-mix(in srgb, white 4%, var(--brutal-shadow));
+  }
+
+  :global(.dark) .results-toolbar {
+    background: color-mix(in srgb, var(--card-surface) 88%, transparent);
+  }
+
+  :global(.dark) .result-card {
+    box-shadow: none;
+  }
+
+  :global(.dark) .result-card:hover {
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--result-color) 7%, transparent),
+      transparent 46%
+    );
+  }
+
+  :global(.dark) .result-title {
+    color: color-mix(in srgb, var(--result-color) 88%, white);
+  }
+
+  :global(.dark) .result-card-active {
+    border-left-color: var(--result-color);
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--result-color) 10%, transparent),
+      color-mix(in srgb, var(--result-color) 4%, transparent) 58%,
+      transparent
+    );
+    box-shadow: none;
+  }
+
+  :global(.dark .results-list-panel .result-card-active) {
+    box-shadow: none;
   }
 </style>

@@ -8,7 +8,9 @@ import (
 	"errors"
 	"time"
 
+	sqlite3 "github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // CrawlJobStatus values.
@@ -88,20 +90,69 @@ func UpdateCrawlJobStatus(id, status string) error {
 	return DB.Model(&CrawlJob{}).Where("id = ?", id).Update("status", status).Error
 }
 
+// IsUniqueConstraintError reports whether err is a SQLite unique constraint
+// violation, meaning the row already exists in the database.
+func IsUniqueConstraintError(err error) bool {
+	var sqliteErr sqlite3.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
+}
+
 // InsertCrawlURLIfNotExists adds a URL to the job's queue only when it has not
 // been seen before (the unique index on job_id+url enforces this).
 func InsertCrawlURLIfNotExists(jobID, rawURL string, depth int) error {
-	cu := CrawlURL{JobID: jobID, URL: rawURL}
-	result := DB.Where(cu).FirstOrCreate(&cu, CrawlURL{
+	cu := CrawlURL{
 		JobID:  jobID,
 		URL:    rawURL,
 		Depth:  depth,
 		Status: CrawlURLPending,
-	})
-	return result.Error
+	}
+	return DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&cu).Error
 }
 
-// InsertCrawlURLDone records a URL as already done without going through the
+// BulkInsertCrawlURLs inserts all URLs for the given job in a single
+// transaction, silently skipping any that are already present.
+func BulkInsertCrawlURLs(jobID string, urls []string, depth int) error {
+	if len(urls) == 0 {
+		return nil
+	}
+	records := make([]CrawlURL, 0, len(urls))
+	for _, u := range urls {
+		records = append(records, CrawlURL{
+			JobID:  jobID,
+			URL:    u,
+			Depth:  depth,
+			Status: CrawlURLPending,
+		})
+	}
+	// CreateInBatches wraps each batch in its own transaction and generates a
+	// single multi-row INSERT per batch, keeping the statement size bounded.
+	return DB.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(records, 500).Error
+}
+
+// MarkDoneAndEnqueueLinks marks a crawl URL as done and inserts all discovered
+// child URLs in a single transaction, minimising the number of SQLite commits.
+func MarkDoneAndEnqueueLinks(id uint, jobID string, links []string, depth int) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&CrawlURL{}).Where("id = ?", id).
+			Updates(map[string]any{"status": CrawlURLDone, "error": ""}).Error; err != nil {
+			return err
+		}
+		if len(links) == 0 {
+			return nil
+		}
+		records := make([]CrawlURL, 0, len(links))
+		for _, u := range links {
+			records = append(records, CrawlURL{
+				JobID:  jobID,
+				URL:    u,
+				Depth:  depth,
+				Status: CrawlURLPending,
+			})
+		}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(records, 500).Error
+	})
+}
+
 // pending state (used for redirect targets that have been fetched indirectly).
 func InsertCrawlURLDone(jobID, rawURL string, depth int) error {
 	// Update if already present, otherwise insert as done.

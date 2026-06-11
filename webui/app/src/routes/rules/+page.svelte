@@ -1,13 +1,31 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { Action } from 'svelte/action';
+
+  const focusInput: Action<HTMLElement> = (node) => {
+    (node.querySelector('input') as HTMLInputElement | null)?.focus();
+  };
   import { fetchConfig, apiFetch } from '$lib/api';
   import { Button } from '@hister/components/ui/button';
   import { Input } from '@hister/components/ui/input';
   import { Badge } from '@hister/components/ui/badge';
   import * as Card from '@hister/components/ui/card';
   import * as Table from '@hister/components/ui/table';
-  import { Shield, Link2, Plus, Trash2, Pencil, Check, X } from '@lucide/svelte';
+  import {
+    Shield,
+    Link2,
+    Plus,
+    Trash2,
+    Pencil,
+    Check,
+    X,
+    Search,
+    ChevronsUpDown,
+    ChevronUp,
+    ChevronDown,
+  } from '@lucide/svelte';
   import { PageHeader } from '@hister/components';
+  import { Label } from '@hister/components/ui/label';
   import * as Alert from '@hister/components/ui/alert';
   import AlertCircle from '@lucide/svelte/icons/circle-alert';
   import CheckCircle from '@lucide/svelte/icons/circle-check';
@@ -44,12 +62,74 @@
   let editRulePattern = $state('');
   let editRuleType: 'skip' | 'priority' | 'versioning' = $state('skip');
 
+  // Filter state
+  let aliasFilterOpen = $state(false);
+  let aliasFilter = $state('');
+  let ruleFilterOpen = $state(false);
+  let ruleFilter = $state('');
+
+  // Sort state
+  class SortState<C extends string> {
+    col = $state<C | null>(null);
+    dir = $state<'asc' | 'desc'>('asc');
+    toggle(col: C) {
+      if (this.col === col) {
+        if (this.dir === 'asc') this.dir = 'desc';
+        else {
+          this.col = null;
+          this.dir = 'asc';
+        }
+      } else {
+        this.col = col;
+        this.dir = 'asc';
+      }
+    }
+  }
+  const aliasSort = new SortState<'keyword' | 'value'>();
+  const ruleSort = new SortState<'pattern' | 'type'>();
+
   const ruleRows = $derived.by(() => {
     const rows: RuleRow[] = [];
     for (const p of rules.skip) rows.push({ pattern: p, type: 'skip' });
     for (const p of rules.priority) rows.push({ pattern: p, type: 'priority' });
     for (const p of rules.versioning) rows.push({ pattern: p, type: 'versioning' });
     return rows;
+  });
+
+  const filteredAliases = $derived.by(() => {
+    const q = aliasFilter.trim().toLowerCase();
+    const entries = Object.entries(rules.aliases);
+    if (!q) return entries;
+    return entries.filter(([k, v]) => k.toLowerCase().includes(q) || v.toLowerCase().includes(q));
+  });
+
+  const filteredRuleRows = $derived.by(() => {
+    const q = ruleFilter.trim().toLowerCase();
+    const indexed = ruleRows.map((row, i) => ({ row, i }));
+    if (!q) return indexed;
+    return indexed.filter(({ row }) => row.pattern.toLowerCase().includes(q));
+  });
+
+  const sortedAliases = $derived.by(() => {
+    const arr = [...filteredAliases];
+    if (!aliasSort.col) return arr;
+    const { col, dir } = aliasSort;
+    return arr.sort((a, b) => {
+      const va = col === 'keyword' ? a[0] : a[1];
+      const vb = col === 'keyword' ? b[0] : b[1];
+      return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+    });
+  });
+
+  const sortedRuleRows = $derived.by(() => {
+    const arr = [...filteredRuleRows];
+    if (!ruleSort.col) return arr;
+    const { col, dir } = ruleSort;
+    return arr.sort((a, b) => {
+      const va = col === 'pattern' ? a.row.pattern : a.row.type;
+      const vb = col === 'pattern' ? b.row.pattern : b.row.type;
+      return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+    });
   });
 
   onMount(async () => {
@@ -293,9 +373,6 @@
   <!-- Section Header -->
   <div class="flex flex-col gap-4">
     <PageHeader color="hister-coral" size="lg" class="uppercase">Rules &amp; Aliases</PageHeader>
-    <p class="font-inter text-text-brand-secondary max-w-175 text-base leading-relaxed md:text-lg">
-      Configure Hister rules
-    </p>
   </div>
 
   {#if message}
@@ -309,6 +386,110 @@
     </Alert.Root>
   {/if}
 
+  {#snippet filterToggleButton(colorClass: string, toggle: () => void)}
+    <Button
+      size="sm"
+      onclick={toggle}
+      class="font-space border-brutal-border brutal-press h-8 gap-1.5 border-[3px] px-3 text-xs font-bold tracking-[1px] uppercase {colorClass}"
+    >
+      <Search class="size-3" />Filter
+    </Button>
+  {/snippet}
+
+  {#snippet filterInputRow(
+    open: boolean,
+    filterValue: string,
+    setFilter: (v: string) => void,
+    placeholder: string,
+    focusClass: string,
+  )}
+    {#if open}
+      <Table.Row class="bg-muted-surface border-brutal-border border-b-[3px]">
+        <Table.Head colspan={3} class="h-auto px-2 py-2 md:px-5">
+          <div use:focusInput>
+            <Input
+              type="text"
+              variant="brutal"
+              value={filterValue}
+              oninput={(e) => setFilter((e.target as HTMLInputElement).value)}
+              {placeholder}
+              class="bg-card-surface h-8 w-full px-3 text-sm font-normal {focusClass}"
+            />
+          </div>
+        </Table.Head>
+      </Table.Row>
+    {/if}
+  {/snippet}
+
+  {#snippet sortableHead(
+    label: string,
+    col: string,
+    sortCol: string | null,
+    sortDir: 'asc' | 'desc',
+    onToggle: () => void,
+    headClass: string,
+  )}
+    <Table.Head class={headClass}>
+      <button
+        class="flex cursor-pointer items-center gap-1 border-0 bg-transparent p-0 font-[inherit] text-[inherit] tracking-[inherit] uppercase hover:opacity-100 opacity-80"
+        onclick={onToggle}
+      >
+        {label}
+        {#if sortCol === col}
+          {#if sortDir === 'asc'}
+            <ChevronUp class="size-3 shrink-0" />
+          {:else}
+            <ChevronDown class="size-3 shrink-0" />
+          {/if}
+        {:else}
+          <ChevronsUpDown class="size-3 shrink-0 opacity-50" />
+        {/if}
+      </button>
+    </Table.Head>
+  {/snippet}
+
+  {#snippet editCancelButtons(onSave: () => void, onCancel: () => void)}
+    <div class="flex items-center gap-1">
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        class="text-hister-teal shrink-0 transition-colors"
+        onclick={onSave}
+      >
+        <Check class="size-4" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        class="text-text-brand-muted shrink-0 transition-colors"
+        onclick={onCancel}
+      >
+        <X class="size-4" />
+      </Button>
+    </div>
+  {/snippet}
+
+  {#snippet editDeleteButtons(onEdit: () => void, onDelete: () => void, editHoverClass: string)}
+    <div class="flex items-center gap-1">
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        class="text-text-brand-muted shrink-0 transition-colors {editHoverClass}"
+        onclick={onEdit}
+      >
+        <Pencil class="size-4" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        class="text-text-brand-muted hover:text-hister-rose shrink-0 transition-colors"
+        onclick={onDelete}
+      >
+        <Trash2 class="size-4" />
+      </Button>
+    </div>
+  {/snippet}
+
   {#if loading}
     <div class="flex items-center justify-center py-16">
       <p class="font-inter text-text-brand-muted text-lg">Loading rules...</p>
@@ -319,14 +500,14 @@
       <Card.Root>
         <Card.Header color="hister-indigo">
           <div class="flex h-12 w-12 shrink-0 items-center justify-center bg-white/20">
-            <Link2 class="text-background size-6" />
+            <Link2 class="size-6 text-white" />
           </div>
           <div class="flex flex-col gap-1">
             <Card.Title
-              class="font-space text-background text-xl font-extrabold tracking-[1px] uppercase"
+              class="font-space text-xl font-extrabold tracking-[1px] text-white uppercase"
               >Search aliases</Card.Title
             >
-            <Card.Description class="font-inter text-background/70 text-sm"
+            <Card.Description class="font-inter text-sm text-white/80"
               >{Object.keys(rules.aliases).length} aliases configured</Card.Description
             >
           </div>
@@ -337,27 +518,31 @@
         >
           <form
             onsubmit={addAlias}
-            class="flex w-full flex-col items-stretch gap-3 md:flex-row md:items-center"
+            class="flex w-full flex-col items-stretch gap-3 md:flex-row md:items-end"
           >
-            <div class="flex items-center gap-3 md:contents">
+            <div class="flex flex-col gap-1">
+              <Label class="font-outfit text-text-brand text-sm font-bold">Keyword</Label>
               <Input
                 type="text"
                 variant="brutal"
                 bind:value={newAliasKeyword}
                 placeholder="keyword..."
-                class="bg-card-surface focus-visible:border-hister-indigo h-10 w-28 px-3 md:w-35"
+                class="bg-card-surface focus-visible:border-hister-indigo h-10 w-full px-3 md:w-35"
               />
+            </div>
+            <div class="flex flex-1 flex-col gap-1">
+              <Label class="font-outfit text-text-brand text-sm font-bold">Expands to</Label>
               <Input
                 type="text"
                 variant="brutal"
                 bind:value={newAliasValue}
                 placeholder="expands to..."
-                class="bg-card-surface focus-visible:border-hister-indigo h-10 flex-1 px-3"
+                class="bg-card-surface focus-visible:border-hister-indigo h-10 w-full px-3"
               />
             </div>
             <Button
               type="submit"
-              class="bg-hister-indigo font-space border-brutal-border brutal-press text-background h-10 gap-2 border-[3px] px-5 text-sm font-bold tracking-[1px] uppercase"
+              class="bg-hister-indigo font-space border-brutal-border brutal-press h-10 gap-2 border-[3px] px-5 text-sm font-bold tracking-[1px] text-white uppercase"
             >
               <Plus class="size-4 shrink-0" />
               Add
@@ -372,19 +557,39 @@
               <Table.Row
                 class="bg-muted-surface border-brutal-border hover:bg-muted-surface border-b-[3px]"
               >
-                <Table.Head
-                  class="font-space text-text-brand-muted h-auto w-20 px-2 py-3 text-xs font-bold tracking-[1px] uppercase md:w-35 md:px-5"
-                  >Keyword</Table.Head
-                >
-                <Table.Head
-                  class="font-space text-text-brand-muted h-auto px-2 py-3 text-xs font-bold tracking-[1px] uppercase md:px-5"
-                  >Expands to</Table.Head
-                >
-                <Table.Head class="h-auto w-16 px-2 py-3 md:w-20 md:px-5"></Table.Head>
+                {@render sortableHead(
+                  'Keyword',
+                  'keyword',
+                  aliasSort.col,
+                  aliasSort.dir,
+                  () => aliasSort.toggle('keyword'),
+                  'font-space text-text-brand-muted h-auto w-20 px-2 py-3 text-xs font-bold tracking-[1px] uppercase md:w-35 md:px-5',
+                )}
+                {@render sortableHead(
+                  'Expands to',
+                  'value',
+                  aliasSort.col,
+                  aliasSort.dir,
+                  () => aliasSort.toggle('value'),
+                  'font-space text-text-brand-muted h-auto px-2 py-3 text-xs font-bold tracking-[1px] uppercase md:px-5',
+                )}
+                <Table.Head class="h-auto w-16 px-2 py-3 md:w-20 md:px-5">
+                  {@render filterToggleButton('bg-hister-indigo text-white', () => {
+                    aliasFilterOpen = !aliasFilterOpen;
+                    if (!aliasFilterOpen) aliasFilter = '';
+                  })}
+                </Table.Head>
               </Table.Row>
+              {@render filterInputRow(
+                aliasFilterOpen,
+                aliasFilter,
+                (v) => (aliasFilter = v),
+                'Filter aliases...',
+                'focus-visible:border-hister-indigo',
+              )}
             </Table.Header>
             <Table.Body>
-              {#each Object.entries(rules.aliases) as [keyword, value]}
+              {#each sortedAliases as [keyword, value]}
                 <Table.Row class="border-brutal-border border-b-[3px]">
                   {#if editingAliasKey === keyword}
                     <Table.Cell class="px-2 py-2 md:px-3" colspan={2}>
@@ -408,24 +613,7 @@
                       </div>
                     </Table.Cell>
                     <Table.Cell class="w-16 px-1 py-2 md:w-20 md:px-3">
-                      <div class="flex items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          class="text-hister-teal shrink-0 transition-colors"
-                          onclick={saveEditAlias}
-                        >
-                          <Check class="size-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          class="text-text-brand-muted shrink-0 transition-colors"
-                          onclick={cancelEditAlias}
-                        >
-                          <X class="size-4" />
-                        </Button>
-                      </div>
+                      {@render editCancelButtons(saveEditAlias, cancelEditAlias)}
                     </Table.Cell>
                   {:else}
                     <Table.Cell
@@ -437,24 +625,11 @@
                       >{value}</Table.Cell
                     >
                     <Table.Cell class="w-16 px-1 py-3 md:w-20 md:px-3">
-                      <div class="flex items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          class="text-text-brand-muted hover:text-hister-indigo shrink-0 transition-colors"
-                          onclick={() => startEditAlias(keyword, value)}
-                        >
-                          <Pencil class="size-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          class="text-text-brand-muted hover:text-hister-rose shrink-0 transition-colors"
-                          onclick={() => deleteAlias(keyword)}
-                        >
-                          <Trash2 class="size-4" />
-                        </Button>
-                      </div>
+                      {@render editDeleteButtons(
+                        () => startEditAlias(keyword, value),
+                        () => deleteAlias(keyword),
+                        'hover:text-hister-indigo',
+                      )}
                     </Table.Cell>
                   {/if}
                 </Table.Row>
@@ -462,7 +637,7 @@
             </Table.Body>
           </Table.Root>
 
-          {#if Object.keys(rules.aliases).length === 0}
+          {#if sortedAliases.length === 0}
             <div class="flex flex-col items-center justify-center gap-3 py-10">
               <div
                 class="flex h-12 w-12 items-center justify-center"
@@ -470,7 +645,9 @@
               >
                 <Link2 class="size-5" />
               </div>
-              <p class="font-inter text-text-brand-muted text-sm">No aliases defined yet.</p>
+              <p class="font-inter text-text-brand-muted text-sm">
+                {aliasFilter ? 'No aliases match the filter.' : 'No aliases defined yet.'}
+              </p>
             </div>
           {/if}
         </Card.Content>
@@ -480,19 +657,19 @@
       <Card.Root>
         <Card.Header color="hister-coral">
           <div class="flex h-12 w-12 shrink-0 items-center justify-center bg-white/20">
-            <Shield class="text-background size-6" />
+            <Shield class="size-6 text-white" />
           </div>
           <div class="flex flex-col gap-1">
             <Card.Title
-              class="font-space text-background text-xl font-extrabold tracking-[1px] uppercase"
+              class="font-space text-xl font-extrabold tracking-[1px] text-white uppercase"
               >Indexing rules</Card.Title
             >
-            <Card.Description class="font-inter text-background/70 text-sm"
+            <Card.Description class="font-inter text-sm text-white/80"
               >{ruleRows.length} rules configured · patterns use
               <a
                 href="https://pkg.go.dev/regexp/syntax"
                 target="_blank"
-                class="text-page-bg underline opacity-80 hover:opacity-100">Go regexp</a
+                class="text-white underline opacity-80 hover:opacity-100">Go regexp</a
               > syntax</Card.Description
             >
           </div>
@@ -501,18 +678,22 @@
         <div
           class="bg-muted-surface border-brutal-border flex items-center border-b-[3px] px-4 py-4 md:px-5 md:py-5"
         >
-          <div class="flex w-full flex-col items-stretch gap-3 md:flex-row md:items-center">
-            <div class="flex items-center gap-3 md:contents">
+          <div class="flex w-full flex-col items-stretch gap-3 md:flex-row md:items-end">
+            <div class="flex flex-1 flex-col gap-1">
+              <Label class="font-outfit text-text-brand text-sm font-bold">Pattern</Label>
               <Input
                 type="text"
                 variant="brutal"
                 bind:value={newRulePattern}
                 placeholder="Enter Go regexp pattern"
-                class="bg-card-surface focus-visible:border-hister-coral h-10 flex-1 px-3"
+                class="bg-card-surface focus-visible:border-hister-coral h-10 w-full px-3"
               />
+            </div>
+            <div class="flex flex-col gap-1">
+              <Label class="font-outfit text-text-brand text-sm font-bold">Type</Label>
               <select
                 bind:value={newRuleType}
-                class="bg-card-surface border-brutal-border font-space text-text-brand h-10 w-25 shrink-0 cursor-pointer appearance-none border-[3px] px-3 text-center text-xs font-bold tracking-[0.5px] outline-none md:w-27.5"
+                class="bg-card-surface border-brutal-border font-space text-text-brand h-10 w-full shrink-0 cursor-pointer appearance-none border-[3px] px-3 text-center text-xs font-bold tracking-[0.5px] outline-none md:w-27.5"
               >
                 <option value="skip">SKIP</option>
                 <option value="priority">PRIORITY</option>
@@ -522,7 +703,7 @@
             <Button
               type="button"
               onclick={addRule}
-              class="bg-hister-coral font-space border-brutal-border brutal-press text-background h-10 gap-2 border-[3px] px-5 text-sm font-bold tracking-[1px] uppercase"
+              class="bg-hister-coral font-space border-brutal-border brutal-press h-10 gap-2 border-[3px] px-5 text-sm font-bold tracking-[1px] text-white uppercase"
             >
               <Plus class="size-4 shrink-0" />
               Add
@@ -537,19 +718,39 @@
               <Table.Row
                 class="bg-muted-surface border-brutal-border hover:bg-muted-surface border-b-[3px]"
               >
-                <Table.Head
-                  class="font-space text-text-brand-muted h-auto px-2 py-3 text-xs font-bold tracking-[1px] uppercase md:px-5"
-                  >Pattern</Table.Head
-                >
-                <Table.Head
-                  class="font-space text-text-brand-muted h-auto w-20 px-2 py-3 text-xs font-bold tracking-[1px] uppercase md:w-28 md:px-5"
-                  >Type</Table.Head
-                >
-                <Table.Head class="h-auto w-16 px-2 py-3 md:w-20 md:px-5"></Table.Head>
+                {@render sortableHead(
+                  'Pattern',
+                  'pattern',
+                  ruleSort.col,
+                  ruleSort.dir,
+                  () => ruleSort.toggle('pattern'),
+                  'font-space text-text-brand-muted h-auto px-2 py-3 text-xs font-bold tracking-[1px] uppercase md:px-5',
+                )}
+                {@render sortableHead(
+                  'Type',
+                  'type',
+                  ruleSort.col,
+                  ruleSort.dir,
+                  () => ruleSort.toggle('type'),
+                  'font-space text-text-brand-muted h-auto w-20 px-2 py-3 text-xs font-bold tracking-[1px] uppercase md:w-28 md:px-5',
+                )}
+                <Table.Head class="h-auto w-16 px-2 py-3 md:w-20 md:px-5">
+                  {@render filterToggleButton('bg-hister-coral text-white', () => {
+                    ruleFilterOpen = !ruleFilterOpen;
+                    if (!ruleFilterOpen) ruleFilter = '';
+                  })}
+                </Table.Head>
               </Table.Row>
+              {@render filterInputRow(
+                ruleFilterOpen,
+                ruleFilter,
+                (v) => (ruleFilter = v),
+                'Filter rules...',
+                'focus-visible:border-hister-coral',
+              )}
             </Table.Header>
             <Table.Body>
-              {#each ruleRows as row, i}
+              {#each sortedRuleRows as { row, i }}
                 <Table.Row class="border-brutal-border border-b-[3px]">
                   {#if editingRuleIndex === i}
                     <Table.Cell class="px-2 py-2 md:px-3" colspan={2}>
@@ -575,24 +776,7 @@
                       </div>
                     </Table.Cell>
                     <Table.Cell class="w-16 px-1 py-2 md:w-20 md:px-3">
-                      <div class="flex items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          class="text-hister-teal shrink-0 transition-colors"
-                          onclick={saveEditRule}
-                        >
-                          <Check class="size-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          class="text-text-brand-muted shrink-0 transition-colors"
-                          onclick={cancelEditRule}
-                        >
-                          <X class="size-4" />
-                        </Button>
-                      </div>
+                      {@render editCancelButtons(saveEditRule, cancelEditRule)}
                     </Table.Cell>
                   {:else}
                     <Table.Cell
@@ -604,33 +788,20 @@
                         variant="default"
                         class="font-space border-0 px-2 py-1 text-xs font-bold tracking-[0.5px] uppercase md:px-3 {row.type ===
                         'skip'
-                          ? 'bg-hister-rose text-background'
+                          ? 'bg-hister-rose text-white'
                           : row.type === 'priority'
-                            ? 'bg-hister-teal text-background'
-                            : 'text-background bg-violet-500'}"
+                            ? 'bg-hister-teal text-white'
+                            : 'bg-violet-500 text-white'}"
                       >
                         {row.type}
                       </Badge>
                     </Table.Cell>
                     <Table.Cell class="w-16 px-1 py-3 md:w-20 md:px-3">
-                      <div class="flex items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          class="text-text-brand-muted hover:text-hister-coral shrink-0 transition-colors"
-                          onclick={() => startEditRule(i)}
-                        >
-                          <Pencil class="size-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          class="text-text-brand-muted hover:text-hister-rose shrink-0 transition-colors"
-                          onclick={() => removeRule(row.pattern, row.type)}
-                        >
-                          <Trash2 class="size-4" />
-                        </Button>
-                      </div>
+                      {@render editDeleteButtons(
+                        () => startEditRule(i),
+                        () => removeRule(row.pattern, row.type),
+                        'hover:text-hister-coral',
+                      )}
                     </Table.Cell>
                   {/if}
                 </Table.Row>
@@ -638,7 +809,7 @@
             </Table.Body>
           </Table.Root>
 
-          {#if ruleRows.length === 0}
+          {#if sortedRuleRows.length === 0}
             <div class="flex flex-col items-center justify-center gap-3 py-10">
               <div
                 class="flex h-12 w-12 items-center justify-center"
@@ -646,7 +817,9 @@
               >
                 <Shield class="size-5" />
               </div>
-              <p class="font-inter text-text-brand-muted text-sm">No rules defined yet.</p>
+              <p class="font-inter text-text-brand-muted text-sm">
+                {ruleFilter ? 'No rules match the filter.' : 'No rules defined yet.'}
+              </p>
             </div>
           {/if}
         </Card.Content>

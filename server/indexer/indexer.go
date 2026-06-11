@@ -79,10 +79,13 @@ type Query struct {
 	IncludeHTML       bool    `json:"include_html"`
 	IncludeText       bool    `json:"include_text"`
 	Facets            bool    `json:"facets,omitempty"`
-	// FacetTermSize overrides the default top-N cap for term facets
-	// (domain, language). Zero uses the default. Useful for completion
-	// callers that want to post-filter a larger pool by prefix.
-	FacetTermSize int `json:"facet_term_size,omitempty"`
+	// FacetSizes overrides the default top-N cap per named facet.
+	// Key is the facet name (e.g. "domains", "languages"); zero/missing
+	// values fall back to defaultFacetTermSize.
+	FacetSizes map[string]int `json:"facet_sizes,omitempty"`
+	// FacetsOnly skips document fetching (size=0) and returns only facet
+	// counts. Requires Facets=true. Used by the /api/facets endpoint.
+	FacetsOnly bool `json:"facets_only,omitempty"`
 	// MatchAll bypasses the text-DSL builder and runs a match-all query.
 	// Combine with UserID / Facets / DateFrom / DateTo for cheap aggregate
 	// queries (e.g. completion sources). Text is ignored when set.
@@ -107,10 +110,19 @@ type RangeCount struct {
 	Count int    `json:"count"`
 }
 
+// TermFacet holds the top-N terms for one named facet together with the count
+// of documents that matched terms outside the top-N (Other).
+type TermFacet struct {
+	Terms []TermCount `json:"terms,omitempty"`
+	Other int         `json:"other,omitempty"`
+}
+
 type FacetsResult struct {
-	Domains       []TermCount  `json:"domains,omitempty"`
-	Languages     []TermCount  `json:"languages,omitempty"`
-	DateHistogram []RangeCount `json:"date_histogram,omitempty"`
+	// Terms maps each term-facet name (e.g. "domains", "languages") to its
+	// result. Adding a new term facet only requires a new AddFacet call; no
+	// struct change is needed.
+	Terms         map[string]TermFacet `json:"terms,omitempty"`
+	DateHistogram []RangeCount         `json:"date_histogram,omitempty"`
 }
 
 // dateFacetBuckets drives the "added" histogram. Each entry is a non-
@@ -128,12 +140,20 @@ var dateFacetBuckets = []struct {
 	{"last_year", 365 * 24 * time.Hour},
 }
 
-func addFacets(req *bleve.SearchRequest, termSize int) {
-	if termSize <= 0 {
-		termSize = defaultFacetTermSize
+func addFacets(req *bleve.SearchRequest, sizes map[string]int) {
+	facetSize := func(name string) int {
+		if n := sizes[name]; n > 0 {
+			return n
+		}
+		return defaultFacetTermSize
 	}
-	req.AddFacet("domains", bleve.NewFacetRequest("domain", termSize))
-	req.AddFacet("languages", bleve.NewFacetRequest("language", termSize))
+	req.AddFacet("domains", bleve.NewFacetRequest("domain", facetSize("domains")))
+	req.AddFacet("languages", bleve.NewFacetRequest("language", facetSize("languages")))
+	tf := bleve.NewFacetRequest("type", 2)
+	web, local, afterLocal := float64(types.Web), float64(types.Local), float64(types.Local)+1
+	tf.AddNumericRange(types.Web.String(), &web, &local)
+	tf.AddNumericRange(types.Local.String(), &local, &afterLocal)
+	req.AddFacet("types", tf)
 	now := time.Now()
 	dh := bleve.NewFacetRequest("added", len(dateFacetBuckets)+1)
 	var prev *float64
@@ -146,22 +166,31 @@ func addFacets(req *bleve.SearchRequest, termSize int) {
 	req.AddFacet("added", dh)
 }
 
-func extractTermFacet(f *search.FacetResult) []TermCount {
+func extractTermFacet(f *search.FacetResult) TermFacet {
 	if f == nil || f.Terms == nil {
-		return nil
+		return TermFacet{}
 	}
 	terms := f.Terms.Terms()
 	out := make([]TermCount, 0, len(terms))
 	for _, t := range terms {
 		out = append(out, TermCount{Term: t.Term, Count: t.Count})
 	}
-	return out
+	return TermFacet{Terms: out, Other: f.Other}
 }
 
 func extractFacets(facets search.FacetResults) *FacetsResult {
-	fr := &FacetsResult{
-		Domains:   extractTermFacet(facets["domains"]),
-		Languages: extractTermFacet(facets["languages"]),
+	fr := &FacetsResult{Terms: make(map[string]TermFacet)}
+	for _, name := range []string{"domains", "languages"} {
+		if f := facets[name]; f != nil {
+			fr.Terms[name] = extractTermFacet(f)
+		}
+	}
+	if f := facets["types"]; f != nil {
+		terms := make([]TermCount, 0, len(f.NumericRanges))
+		for _, nr := range f.NumericRanges {
+			terms = append(terms, TermCount{Term: nr.Name, Count: nr.Count})
+		}
+		fr.Terms["types"] = TermFacet{Terms: terms}
 	}
 	if f := facets["added"]; f != nil {
 		for _, nr := range f.NumericRanges {
@@ -215,13 +244,14 @@ var (
 		// https://github.com/blevesearch/bleve/blob/master/docs/persister.md
 		"scorchPersisterOptions": map[string]any{
 			"NumPersisterWorkers":           4,
-			"MaxSizeInMemoryMergePerWorker": 80 * 1024 * 1024, // bytes
-			// default is 1000. With 0 we drastically increases persisting occurences to reduce memory usage
+			"MaxSizeInMemoryMergePerWorker": 40 * 1024 * 1024, // bytes
+			// default is 1000. With 200 we increases persisting occurences to reduce memory usage
 			// https://github.com/blevesearch/bleve/blob/master/index/scorch/persister.go
-			"PersisterNapUnderNumFiles": 0,
+			"PersisterNapUnderNumFiles": 200,
 		},
 		"scorchMergePlanOptions": map[string]any{
 			"FloorSegmentFileSize": 20 * 1024 * 1024, // bytes
+			"SegmentsPerMergeTask": 4,                // default is 10
 		},
 	}
 )
@@ -358,86 +388,86 @@ func Reindex(basePath string, rules *config.Rules, skipSensitiveChecks bool, det
 			tmpIdx.embedder = embedder
 		}
 	}
+	abortReindex := func(err error) error {
+		tmpIdx.Close()
+		if rerr := os.RemoveAll(tmpBasePath); rerr != nil {
+			log.Warn().Err(rerr).Msg("failed to clean up temp index path")
+		}
+		return err
+	}
 	q := query.NewMatchAllQuery()
 	total := idx.Total()
 	batchSize := 50
-	page := 0
-	var sortKey []string
-	req := bleve.NewSearchRequest(q)
-	req.Fields = allFields
-	req.Size = batchSize
-	req.SortBy([]string{"_id"})
-
-	for {
-		if len(sortKey) > 0 {
-			req.SetSearchAfter(sortKey)
-		}
-		res, err := idx.idx.Search(req)
-		if err != nil || len(res.Hits) < 1 {
-			break
-		}
-		n := len(res.Hits)
-		b := newMultiBatch(tmpIdx)
-		for _, h := range res.Hits {
-			d := idx.resFromHit(h, true, true)
-			if d.Type == types.Local {
-				pu, err := url.Parse(d.URL)
-				if err == nil {
-					if _, err := os.Stat(pu.Path); errors.Is(err, os.ErrNotExist) {
-						log.Warn().Str("URL", d.URL).Msg("Skipping document, file not found")
+	processed := 0
+	for subIdxName, subIdx := range idx.indexers {
+		log.Info().Str("sub-index", subIdxName).Msg("Reindexing sub-index")
+		var sortKey []string
+		req := bleve.NewSearchRequest(q)
+		req.Fields = allFields
+		req.Size = batchSize
+		req.SortBy([]string{"_id"})
+		for {
+			if len(sortKey) > 0 {
+				req.SetSearchAfter(sortKey)
+			}
+			res, err := subIdx.Search(req)
+			if err != nil || len(res.Hits) < 1 {
+				break
+			}
+			n := len(res.Hits)
+			b := newMultiBatch(tmpIdx)
+			for _, h := range res.Hits {
+				d := idx.resFromHit(h, true, true)
+				if d.Type == types.Local {
+					pu, err := url.Parse(d.URL)
+					if err == nil {
+						if _, err := os.Stat(pu.Path); errors.Is(err, os.ErrNotExist) {
+							log.Warn().Str("URL", d.URL).Msg("Skipping document, file not found")
+							continue
+						}
+						if files.FindMatchingDir(dirs, pu.Path) == nil {
+							log.Warn().Str("URL", d.URL).Msg("Skipping document, directory no longer configured")
+							continue
+						}
+					}
+				}
+				log.Debug().Str("URL", d.URL).Msg("Indexing")
+				d.SetSkipSensitiveCheck(skipSensitiveChecks)
+				origDate := d.Added
+				if err := d.Process(tmpIdx.langDetector, extractor.Extract); err != nil {
+					if errors.Is(err, document.ErrSensitiveContent) {
+						log.Warn().Err(err).Str("URL", d.URL).Msg("Skipping document, sensitive content")
 						continue
-					}
-					if files.FindMatchingDir(dirs, pu.Path) == nil {
-						log.Warn().Str("URL", d.URL).Msg("Skipping document, directory no longer configured")
+					} else if errors.Is(err, extractor.ErrNoExtractor) {
+						log.Warn().Err(err).Str("URL", d.URL).Msg("Skipping document, can't extract content")
 						continue
+					} else if errors.Is(err, extractor.ErrExtractorAbort) {
+						log.Warn().Err(err).Str("URL", d.URL).Msg("Skipping document, extractor aborted")
+						continue
+					} else if errors.Is(err, document.ErrReadFile) {
+						log.Warn().Err(err).Str("Path", d.URL).Msg("Skipping document, can't read file")
+						continue
+					} else {
+						return abortReindex(err)
 					}
 				}
-			}
-			log.Debug().Str("URL", d.URL).Msg("Indexing")
-			d.SetSkipSensitiveCheck(skipSensitiveChecks)
-			origDate := d.Added
-			if err := d.Process(tmpIdx.langDetector, extractor.Extract); err != nil {
-				if errors.Is(err, document.ErrSensitiveContent) {
-					log.Warn().Err(err).Str("URL", d.URL).Msg("Skipping document, sensitive content")
+				if rules.IsSkip(d.URL) {
+					log.Info().Str("URL", d.URL).Msg("Dropping URL that has since been added to skip rules.")
 					continue
-				} else if errors.Is(err, extractor.ErrNoExtractor) {
-					log.Warn().Err(err).Str("URL", d.URL).Msg("Skipping document, can't extract content")
-					continue
-				} else if errors.Is(err, document.ErrReadFile) {
-					log.Warn().Err(err).Str("Path", d.URL).Msg("Skipping document, can't read file")
-					continue
-				} else {
-					tmpIdx.Close()
-					if rerr := os.RemoveAll(tmpBasePath); rerr != nil {
-						log.Warn().Err(rerr).Msg("failed to clean up temp index path")
-					}
-					return err
+				}
+				d.Added = origDate
+				if err := b.Add(d); err != nil {
+					return abortReindex(err)
 				}
 			}
-			if rules.IsSkip(d.URL) {
-				log.Info().Str("URL", d.URL).Msg("Dropping URL that has since been added to skip rules.")
-				continue
+			if err := b.Save(); err != nil {
+				return abortReindex(err)
 			}
-			d.Added = origDate
-			if err := b.Add(d); err != nil {
-				tmpIdx.Close()
-				if rerr := os.RemoveAll(tmpBasePath); rerr != nil {
-					log.Warn().Err(rerr).Msg("failed to clean up temp index path")
-				}
-				return err
-			}
+			runtime.GC()
+			processed += n
+			sortKey = res.Hits[n-1].Sort
+			log.Info().Msg(fmt.Sprintf("Reindexed [%d/%d]", processed, total))
 		}
-		if err := b.Save(); err != nil {
-			tmpIdx.Close()
-			if rerr := os.RemoveAll(tmpBasePath); rerr != nil {
-				log.Warn().Err(rerr).Msg("failed to clean up temp index path")
-			}
-			return err
-		}
-		runtime.GC()
-		page += 1
-		sortKey = res.Hits[n-1].Sort
-		log.Info().Msg(fmt.Sprintf("Reindexed [%d/%d]", page*batchSize, total))
 	}
 	idx.vectorStore = nil // prevent Close() from closing the store we're still using
 	idx.Close()
@@ -682,24 +712,32 @@ func (i *indexer) countKeyRefs(field, key string) uint64 {
 // and stores their SHA-256 hash keys on the document, clearing the inline fields
 // so that large blobs are not persisted inside the Bleve index.
 // When disablePreviews is true, HTML is discarded entirely and HTMLKey is cleared.
+// Inline blobs are cleared whenever a key is set, so they are never written into
+// the Bleve index DB (e.g. during reindex where resFromHit populates both fields).
 func (i *indexer) prepareForStorage(d *document.Document) error {
 	if i.disablePreviews {
 		d.HTML = ""
 		d.HTMLKey = ""
-	} else if d.HTML != "" && d.HTMLKey == "" {
-		key, err := i.data.write(htmlSubdir, []byte(d.HTML))
-		if err != nil {
-			return fmt.Errorf("store HTML: %w", err)
+	} else {
+		if d.HTML != "" {
+			key, err := i.data.write(htmlSubdir, []byte(d.HTML))
+			if err != nil {
+				return fmt.Errorf("store HTML: %w", err)
+			}
+			d.HTMLKey = key
 		}
-		d.HTMLKey = key
-		d.HTML = ""
+		if d.HTMLKey != "" {
+			d.HTML = ""
+		}
 	}
-	if d.Favicon != "" && d.FaviconKey == "" {
+	if d.Favicon != "" {
 		key, err := i.data.write(faviconSubdir, []byte(d.Favicon))
 		if err != nil {
 			return fmt.Errorf("store favicon: %w", err)
 		}
 		d.FaviconKey = key
+	}
+	if d.FaviconKey != "" {
 		d.Favicon = ""
 	}
 	return nil
@@ -1006,7 +1044,10 @@ func Search(cfg *config.Config, q *Query) (*Results, error) {
 	req := bleve.NewSearchRequest(q.create())
 	req.Fields = allFields
 
-	if q.Limit > 0 {
+	if q.FacetsOnly {
+		req.Size = 0
+		req.Fields = nil
+	} else if q.Limit > 0 {
 		req.Size = q.Limit
 	} else {
 		req.Size = 100
@@ -1041,7 +1082,7 @@ func Search(cfg *config.Config, q *Query) (*Results, error) {
 	}
 
 	if q.Facets {
-		addFacets(req, q.FacetTermSize)
+		addFacets(req, q.FacetSizes)
 	}
 
 	res, err := i.idx.Search(req)

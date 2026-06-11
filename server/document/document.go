@@ -41,9 +41,9 @@ type Document struct {
 	ExtraDocuments []*Document `json:"-"`
 	// SkipIndexing can be set by extractors to mark the document to exclude from indexing. Useful when populating ExtraDocuments
 	SkipIndexing       bool `json:"-"`
+	SkipSensitiveCheck bool `json:"skip_sensitive_check"`
 	faviconURL         string
 	processed          bool
-	skipSensitiveCheck bool
 }
 
 var (
@@ -119,7 +119,7 @@ func (d *Document) Process(ld LanguageDetector, extractFn func(*Document) error)
 	if ld == nil {
 		ld = NewNullLanguageDetector()
 	}
-	if !d.skipSensitiveCheck && sensitiveContentRe != nil && sensitiveContentRe.MatchString(d.HTML) {
+	if !d.SkipSensitiveCheck && sensitiveContentRe != nil && sensitiveContentRe.MatchString(d.HTML) {
 		log.Debug().Msg("Matching sensitive content: " + strings.Join(sensitiveContentRe.FindAllString(d.HTML, -1), ","))
 		return ErrSensitiveContent
 	}
@@ -136,23 +136,8 @@ func (d *Document) Process(ld LanguageDetector, extractFn func(*Document) error)
 	if pu.Scheme == "" || pu.Host == "" {
 		return errors.New("invalid URL: missing scheme/host")
 	}
-	if pu.Fragment != "" {
-		pu.Fragment = ""
-		d.URL = pu.String()
-	}
+	d.normalizeWebURL(pu)
 	d.Added = time.Now().Unix()
-	q := pu.Query()
-	qChange := false
-	for k := range q {
-		if k == "utm" || strings.HasPrefix(k, "utm_") {
-			qChange = true
-			q.Del(k)
-		}
-	}
-	if qChange {
-		pu.RawQuery = q.Encode()
-		d.URL = pu.String()
-	}
 	d.Type = types.Web
 	d.Domain = pu.Host
 	if d.HTML != "" {
@@ -160,17 +145,31 @@ func (d *Document) Process(ld LanguageDetector, extractFn func(*Document) error)
 			return err
 		}
 	}
-
-	d.Language = ld.DetectLanguage(d.Text)
-
-	d.processed = true
+	d.finalizeDocument(ld)
 	return nil
 }
 
-func (d *Document) processFile(ld LanguageDetector) error {
-	if ld == nil {
-		ld = NewNullLanguageDetector()
+// normalizeWebURL strips the URL fragment and removes UTM tracking parameters.
+func (d *Document) normalizeWebURL(pu *url.URL) {
+	if pu.Fragment != "" {
+		pu.Fragment = ""
+		d.URL = pu.String()
 	}
+	q := pu.Query()
+	changed := false
+	for k := range q {
+		if k == "utm" || strings.HasPrefix(k, "utm_") {
+			changed = true
+			q.Del(k)
+		}
+	}
+	if changed {
+		pu.RawQuery = q.Encode()
+		d.URL = pu.String()
+	}
+}
+
+func (d *Document) processFile(ld LanguageDetector) error {
 	osPath := files.FileURLToPath(d.URL)
 	if d.Text == "" {
 		content, err := os.ReadFile(osPath)
@@ -184,7 +183,7 @@ func (d *Document) processFile(ld LanguageDetector) error {
 		}
 		d.Text = string(content)
 	}
-	if !d.skipSensitiveCheck && sensitiveContentRe != nil && sensitiveContentRe.MatchString(d.Text) {
+	if !d.SkipSensitiveCheck && sensitiveContentRe != nil && sensitiveContentRe.MatchString(d.Text) {
 		return ErrSensitiveContent
 	}
 	d.Type = types.Local
@@ -199,15 +198,20 @@ func (d *Document) processFile(ld LanguageDetector) error {
 	if d.Added == 0 {
 		d.Added = time.Now().Unix()
 	}
+	d.finalizeDocument(ld)
+	return nil
+}
+
+// finalizeDocument sets the document language and marks it as processed.
+func (d *Document) finalizeDocument(ld LanguageDetector) {
 	d.Language = ld.DetectLanguage(d.Text)
 	d.processed = true
-	return nil
 }
 
 // SetSkipSensitiveCheck controls whether sensitive content checks are skipped
 // during processing (e.g. during reindex with skipSensitiveChecks=true).
 func (d *Document) SetSkipSensitiveCheck(v bool) {
-	d.skipSensitiveCheck = v
+	d.SkipSensitiveCheck = v
 }
 
 // IsProcessed reports whether the document has already been processed.
@@ -251,6 +255,12 @@ func (d *Document) GetPreviewMeta() map[string]any {
 		var nodes []map[string]any
 		if err := json.Unmarshal([]byte(raw), &nodes); err == nil && len(nodes) > 0 {
 			meta["jsonld"] = nodes
+		}
+	}
+	if raw, ok := d.Metadata["videos"].(string); ok && raw != "" {
+		var vids []map[string]any
+		if err := json.Unmarshal([]byte(raw), &vids); err == nil && len(vids) > 0 {
+			meta["videos"] = vids
 		}
 	}
 	if len(meta) == 0 {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"net/http"
@@ -33,6 +34,7 @@ import (
 	"github.com/asciimoo/hister/server/model"
 	"github.com/asciimoo/hister/ui"
 
+	"github.com/bodgit/sevenzip"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -43,7 +45,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const versionBase = "v0.14.0"
+const versionBase = "v0.15.0"
 
 var Version = func() string {
 	if info, ok := debug.ReadBuildInfo(); ok {
@@ -297,7 +299,7 @@ var listFilesCmd = &cobra.Command{
 	},
 }
 
-var importCmd = &cobra.Command{
+var browserImportCmd = &cobra.Command{
 	Use:   "import-browser [BROWSER_TYPE] [DB_PATH]",
 	Short: "Import Chrome, Firefox or auto-detect browsing history",
 	Long: `
@@ -305,15 +307,16 @@ Import browsing history from a supported browser.
 
 Usage:
   import-browser                        - auto-detect all installed browsers
-  import-browser BROWSER_TYPE           - auto-discover the database for the given browser
-  import-browser BROWSER_TYPE DB_PATH   - use the explicit database path
+  import-browser BROWSER_TYPE 			- auto-detect database path
+  import-browser DB_PATH				- auto-detect browser type
+  import-browser BROWSER_TYPE DB_PATH   - import a browser type with a specific database path
 
-Supported browser types: firefox, chrome, chromium, brave, edge, vivaldi, opera, zen, waterfox
+Supported for browser types for auto-detecting: firefox, chrome, chromium, brave, edge, vivaldi, opera, zen, waterfox, Ladybird
 
 The Firefox URL database is usually located at ~/.mozilla/firefox/*.default/places.sqlite
 The Chrome/Chromium URL database is usually located at ~/.config/chromium/Default/History
 `,
-	Args: ZeroToTwoArgs(),
+	Args: cobra.RangeArgs(0, 2),
 	Run:  importHistory,
 }
 
@@ -503,6 +506,9 @@ var indexCmd = &cobra.Command{
 			clientOpts = append(clientOpts, client.WithTargetUserID(0))
 		} else if userIDChanged {
 			clientOpts = append(clientOpts, client.WithTargetUserID(targetUserID))
+		}
+		if allowSensitive, _ := cmd.Flags().GetBool("allow-sensitive"); allowSensitive {
+			clientOpts = append(clientOpts, client.WithAllowSensitive())
 		}
 
 		force, _ := cmd.Flags().GetBool("force")
@@ -736,6 +742,7 @@ func init() {
 	indexCmd.Flags().Int("delay", 0, "Delay in seconds between requests (0 = no delay; overrides config)")
 	indexCmd.Flags().Int("timeout", 0, "Request timeout in seconds (0 = 5s default; overrides config)")
 	indexCmd.Flags().String("user-agent", "", "User-agent string for requests (overrides config)")
+	indexCmd.Flags().Bool("allow-sensitive", false, "Skip sensitive content checks allowing sensitive content being indexed.")
 }
 
 var deleteCmd = &cobra.Command{
@@ -1015,6 +1022,264 @@ var crawlDeleteCmd = &cobra.Command{
 	},
 }
 
+var exportCmd = &cobra.Command{
+	Use:   "export OUTPUT_FILE [QUERY...]",
+	Short: "Export indexed documents to a JSON file",
+	Long: `Export all indexed documents, or only those matching a search query, to a JSON file.
+
+Each document is written as a single JSON line. Lines not starting with '{' are
+structural markers ('[', ']', ',') and can be safely skipped by parsers.
+
+Use --start-date and --end-date (format: YYYY-MM-DD) to only export
+documents added within the given date range.
+
+Use '-' as OUTPUT_FILE to write to stdout.`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		outputFile := args[0]
+		queryStr := strings.Join(args[1:], " ")
+		if queryStr == "" {
+			queryStr = "*"
+		}
+
+		var dateFrom, dateTo int64
+		if v, _ := cmd.Flags().GetString("start-date"); v != "" {
+			t, err := time.Parse("2006-01-02", v)
+			if err != nil {
+				exit(1, "Invalid --start-date: "+err.Error())
+			}
+			dateFrom = t.Unix()
+		}
+		if v, _ := cmd.Flags().GetString("end-date"); v != "" {
+			t, err := time.Parse("2006-01-02", v)
+			if err != nil {
+				exit(1, "Invalid --end-date: "+err.Error())
+			}
+			dateTo = t.AddDate(0, 0, 1).Unix() - 1
+		}
+
+		var out *os.File
+		if outputFile == "-" {
+			out = os.Stdout
+		} else {
+			f, err := os.Create(outputFile)
+			if err != nil {
+				exit(1, "Failed to create output file: "+err.Error())
+			}
+			defer func() {
+				if err := f.Close(); err != nil {
+					log.Error().Err(err).Msg("Failed to close output file")
+				}
+			}()
+			out = f
+		}
+
+		bw := bufio.NewWriter(out)
+		defer func() {
+			if err := bw.Flush(); err != nil {
+				log.Error().Err(err).Msg("Failed to flush output")
+			}
+		}()
+
+		if _, err := fmt.Fprintln(bw, "["); err != nil {
+			exit(1, "Write error: "+err.Error())
+		}
+
+		c := newClient(client.WithTimeout(0))
+		first := true
+		count := 0
+		pageKey := ""
+		for {
+			res, err := c.Search(&indexer.Query{
+				Text:        queryStr,
+				PageKey:     pageKey,
+				IncludeHTML: true,
+				IncludeText: true,
+				DateFrom:    dateFrom,
+				DateTo:      dateTo,
+			})
+			if err != nil {
+				exit(1, "Search failed: "+err.Error())
+			}
+			for _, d := range res.Documents {
+				b, merr := json.Marshal(d)
+				if merr != nil {
+					log.Warn().Err(merr).Str("url", d.URL).Msg("Failed to serialize document, skipping")
+					continue
+				}
+				if !first {
+					if _, werr := fmt.Fprintln(bw, ","); werr != nil {
+						exit(1, "Write error: "+werr.Error())
+					}
+				}
+				first = false
+				if _, werr := bw.Write(b); werr != nil {
+					exit(1, "Write error: "+werr.Error())
+				}
+				if _, werr := fmt.Fprintln(bw); werr != nil {
+					exit(1, "Write error: "+werr.Error())
+				}
+				count++
+			}
+			if res.PageKey == "" || len(res.Documents) == 0 {
+				break
+			}
+			pageKey = res.PageKey
+		}
+
+		if _, err := fmt.Fprintln(bw, "]"); err != nil {
+			exit(1, "Write error: "+err.Error())
+		}
+
+		if outputFile != "-" {
+			fmt.Printf("%s Exported %d document(s) to %s\n",
+				cliSuccessStyle.Render("✓"), count, cliInfoStyle.Render(outputFile))
+		}
+	},
+}
+
+var importCmd = &cobra.Command{
+	Use:   "import INPUT_FILE",
+	Short: "Import documents from an export JSON file",
+	Long: `Import documents from a JSON file previously created by the export command.
+
+The file is read line by line; each line starting with '{' is parsed as a
+document and submitted to the running server. Content is re-processed
+server-side from the stored HTML.
+
+The input file may be a plain JSON file or a 7z-compressed archive (.7z)
+containing a single JSON file.
+
+Use --start-date and --end-date (format: YYYY-MM-DD) to only import
+documents whose "added" timestamp falls within the given date range.`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		inputFile := args[0]
+		skip, _ := cmd.Flags().GetBool("skip-existing")
+
+		var startDate, endDate int64 = 0, 0
+		if v, _ := cmd.Flags().GetString("start-date"); v != "" {
+			t, err := time.Parse("2006-01-02", v)
+			if err != nil {
+				exit(1, "Invalid --start-date: "+err.Error())
+			}
+			startDate = t.Unix()
+		}
+		if v, _ := cmd.Flags().GetString("end-date"); v != "" {
+			t, err := time.Parse("2006-01-02", v)
+			if err != nil {
+				exit(1, "Invalid --end-date: "+err.Error())
+			}
+			endDate = t.AddDate(0, 0, 1).Unix() - 1
+		}
+
+		var reader io.Reader
+
+		if strings.HasSuffix(strings.ToLower(inputFile), ".7z") {
+			sz, err := sevenzip.OpenReader(inputFile)
+			if err != nil {
+				exit(1, "Failed to open 7z archive: "+err.Error())
+			}
+			defer func() {
+				if err := sz.Close(); err != nil {
+					log.Error().Err(err).Msg("Failed to close 7z archive")
+				}
+			}()
+
+			var jsonEntry *sevenzip.File
+			for _, entry := range sz.File {
+				if strings.HasSuffix(strings.ToLower(entry.Name), ".json") {
+					jsonEntry = entry
+					break
+				}
+			}
+			if jsonEntry == nil {
+				exit(1, "No JSON file found inside 7z archive")
+			}
+			rc, err := jsonEntry.Open()
+			if err != nil {
+				exit(1, "Failed to open JSON entry in 7z archive: "+err.Error())
+			}
+			defer func() {
+				if err := rc.Close(); err != nil {
+					log.Error().Err(err).Msg("Failed to close 7z entry reader")
+				}
+			}()
+			reader = rc
+		} else {
+			f, err := os.Open(inputFile)
+			if err != nil {
+				exit(1, "Failed to open input file: "+err.Error())
+			}
+			defer func() {
+				if err := f.Close(); err != nil {
+					log.Error().Err(err).Msg("Failed to close input file")
+				}
+			}()
+			reader = f
+		}
+
+		const maxLineSize = 16 * 1024 * 1024 // 16 MB covers large HTML+favicon lines
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 64*1024), maxLineSize)
+
+		c := newClient(client.WithTimeout(0))
+		imported := 0
+		skipped := 0
+		errCount := 0
+
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) == 0 || line[0] != '{' {
+				continue
+			}
+			var d document.Document
+			if err := json.Unmarshal(line, &d); err != nil {
+				log.Warn().Err(err).Msg("Failed to parse document line, skipping")
+				errCount++
+				continue
+			}
+			if (startDate != 0 && d.Added < startDate) || (endDate != 0 && d.Added > endDate) {
+				log.Debug().Str("url", d.URL).Int64("added", d.Added).Msg("Skipping document outside of date range")
+				skipped++
+				continue
+			}
+			if skip {
+				exists, err := c.DocumentExists(d.URL)
+				if err != nil {
+					log.Warn().Err(err).Str("url", d.URL).Msg("Failed to check if document exists, skipping")
+					errCount++
+					continue
+				}
+				if exists {
+					log.Debug().Str("url", d.URL).Msg("Document already exists, skipping")
+					skipped++
+					continue
+				}
+			}
+			if err := c.AddDocumentJSON(&d); err != nil {
+				log.Warn().Err(err).Str("url", d.URL).Msg("Failed to add document")
+				errCount++
+				continue
+			}
+			imported++
+		}
+
+		if err := scanner.Err(); err != nil {
+			exit(1, "Failed to read input file: "+err.Error())
+		}
+
+		msg := fmt.Sprintf("%s Imported %d document(s)", cliSuccessStyle.Render("✓"), imported)
+		if skipped > 0 {
+			msg += fmt.Sprintf(" (%d skipped)", skipped)
+		}
+		if errCount > 0 {
+			msg += fmt.Sprintf(" (%d errors)", errCount)
+		}
+		fmt.Println(msg)
+	},
+}
+
 var reindexCmd = &cobra.Command{
 	Use:   "reindex",
 	Short: "Reindex",
@@ -1082,6 +1347,8 @@ func init() {
 	rootCmd.AddCommand(listURLsCmd)
 	rootCmd.AddCommand(listFilesCmd)
 	rootCmd.AddCommand(indexCmd)
+	rootCmd.AddCommand(browserImportCmd)
+	rootCmd.AddCommand(exportCmd)
 	rootCmd.AddCommand(importCmd)
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(reindexCmd)
@@ -1104,6 +1371,11 @@ func init() {
 	importCmd.Flags().StringToString("backend-option", nil, "Crawler backend option as key=value (repeatable, e.g. --backend-option exec_path=/usr/bin/chromium)")
 	importCmd.Flags().StringToString("header", nil, "Extra HTTP header as KEY=VALUE (repeatable, e.g. --header Accept-Language=en)")
 	importCmd.Flags().StringArray("cookie", nil, "HTTP cookie as Set-Cookie value (repeatable, e.g. --cookie \"session=abc; Domain=example.com\")")
+	importCmd.Flags().String("start-date", "", "only import documents added on or after this date (YYYY-MM-DD)")
+	importCmd.Flags().String("end-date", "", "only import documents added on or before this date (YYYY-MM-DD)")
+
+	exportCmd.Flags().String("start-date", "", "only export documents added on or after this date (YYYY-MM-DD)")
+	exportCmd.Flags().String("end-date", "", "only export documents added on or before this date (YYYY-MM-DD)")
 
 	createUserCmd.Flags().Bool("admin", false, "create user with admin privileges")
 
@@ -1117,6 +1389,8 @@ func init() {
 	deleteUserCmd.Flags().Bool("purge", false, "also delete all indexed documents belonging to the user")
 
 	showUserCmd.Flags().Bool("token", false, "display the user's access token")
+
+	importCmd.Flags().Bool("skip-existing", false, "Do not overwrite documents that are already in the index")
 
 	reindexCmd.Flags().BoolP("exclude-sensitive", "x", false, "don't add documents that contain sensitive content matched by config.SensitiveContentPatterns")
 
@@ -1225,6 +1499,15 @@ func initLog() {
 	default:
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 		log.Warn().Str("Invalid config log level", cfg.App.LogLevel)
+	}
+
+	if cfg.App.LogFile != "" {
+		f, err := os.OpenFile(cfg.App.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+		if err != nil {
+			log.Error().Err(err).Str("log_file", cfg.App.LogFile).Msg("Failed to open log file, falling back to stderr")
+			return
+		}
+		log.Logger = log.Logger.Output(f)
 	}
 }
 
@@ -1484,29 +1767,28 @@ func importHistory(cmd *cobra.Command, args []string) {
 			}
 		}
 
-	case 1:
-		// Browser name given; auto-discover its database.
-		browser := strings.ToLower(args[0])
-		var found bool
-		for _, db := range getDBPaths() {
-			if strings.HasPrefix(strings.ToLower(db.name), browser) {
-				found = true
-				for _, path := range db.paths {
-					importDB(path, db.table_name, cmd)
-				}
+	case 1, 2:
+		if len(args) == 1 {
+			// check if args[0] is a file or not and call the correct function
+			if _, err := os.Stat(args[0]); os.IsNotExist(err) {
+				importBrowser(strings.ToLower(args[0]), cmd)
+			} else {
+				importHistoryFile(args[0], cmd)
 			}
-		}
-		if !found {
-			log.Fatal().Str("browser", args[0]).Msg("no database found for browser")
+		} else {
+			browser := args[0]
+			table_name := browserTableName(browser)
+			println(browser)
+			println(table_name)
+			if table_name == "" {
+				log.Warn().Msg(fmt.Sprintf("Unknown browser, couldn't auto detect table name using %s as table name", browser))
+				table_name = browser
+			}
+			importDB(args[1], table_name, cmd)
 		}
 
-	case 2:
-		// Browser name + explicit path.
-		table := browserTableName(args[0])
-		if table == "" {
-			log.Fatal().Str("browser", args[0]).Msg("unknown browser type")
-		}
-		importDB(args[1], table, cmd)
+	default:
+		log.Fatal().Msg(cmd.Long)
 	}
 
 	// TODO optional date filter
@@ -1515,6 +1797,38 @@ func importHistory(cmd *cobra.Command, args []string) {
 	//	vf = "last_visit_date"
 	//}
 	//q += fmt.Sprintf(" AND %s >= datetime('now', 'localtime', '-1 month')", vf)
+}
+
+func importBrowser(browser string, cmd *cobra.Command) {
+	var found bool
+
+	for _, db := range getDBPaths() {
+		if strings.HasPrefix(strings.ToLower(db.name), browser) {
+			found = true
+			for _, path := range db.paths {
+				importDB(path, db.table_name, cmd)
+			}
+		}
+	}
+	if !found {
+		log.Fatal().Str("browser", browser).Msg("no database found for browser")
+	}
+}
+
+func importHistoryFile(file_path string, cmd *cobra.Command) {
+	var table string
+
+	if strings.HasSuffix(file_path, "places.sqlite") {
+		table = "moz_places"
+	} else if strings.HasSuffix(file_path, "History") {
+		table = "urls"
+	} else if strings.HasSuffix(file_path, "History.db") {
+		table = "History"
+	} else {
+		log.Fatal().Str("file", file_path).Msg("Couldn't auto detect table")
+	}
+
+	importDB(file_path, table, cmd)
 }
 
 func importDB(dbFile string, table string, cmd *cobra.Command) {
@@ -1934,24 +2248,8 @@ func browserTableName(browser string) string {
 		return "moz_places"
 	case "chrome", "chromium", "brave", "edge", "vivaldi", "opera":
 		return "urls"
+	case "ladybird":
+		return "History"
 	}
 	return ""
-}
-
-func ZeroOrTwoArgs() cobra.PositionalArgs {
-	return func(cmd *cobra.Command, args []string) error {
-		if len(args) != 0 && len(args) != 2 {
-			return fmt.Errorf("accepts 0 or 2 arguments, received %d", len(args))
-		}
-		return nil
-	}
-}
-
-func ZeroToTwoArgs() cobra.PositionalArgs {
-	return func(cmd *cobra.Command, args []string) error {
-		if len(args) > 2 {
-			return fmt.Errorf("accepts 0, 1, or 2 arguments, received %d", len(args))
-		}
-		return nil
-	}
 }
